@@ -18,11 +18,12 @@ ament_python_install_package(${PROJECT_NAME})
 # Each entry here becomes a `ros2 run tb3_odometry <script_name>` command.
 # We register scripts here as we add them in later steps.
 install(PROGRAMS
-  # tb3_odometry/odometry_publisher.py   # added in Step 3
-  # tb3_odometry/tf2_broadcaster.py      # added in Step 4
-  # tb3_odometry/imu_republisher.py      # added in Step 5
-  # tb3_odometry/ekf_node.py             # added in Step 6
-  # tb3_odometry/velocity_controller.py  # added in Step 7
+  tb3_odometry/tf2_checker.py           # Step 2 — verify URDF TF tree
+  # tb3_odometry/odometry_publisher.py  # added in Step 3
+  # tb3_odometry/tf2_broadcaster.py     # added in Step 4
+  # tb3_odometry/imu_republisher.py     # added in Step 5
+  # tb3_odometry/ekf_node.py            # added in Step 6
+  # tb3_odometry/velocity_controller.py # added in Step 7
   DESTINATION lib/${PROJECT_NAME}
 )
 
