@@ -178,6 +178,7 @@ turtlebot3-autonomy-stack/
 
 ### 🟢 Stage 1 — Foundation (`tb3_odometry` + `tb3_navigation`)
 **Hardware:** TurtleBot3 Burger (RPi4 + RPLiDAR + IMU) | **Cost:** ~CA$950
+**Branch:** `stage-1` | **Milestone tag:** `v1.0.0`
 
 **What this stage demonstrates:**
 - Real robot bring-up: sensor drivers, TF2 transform tree, ROS2 network over WiFi
@@ -185,15 +186,121 @@ turtlebot3-autonomy-stack/
 - IMU + odometry fusion via Extended Kalman Filter (`robot_localization`)
 - SLAM Toolbox: building a real room map with RPLiDAR
 - Nav2 autonomous navigation: point-to-point, obstacle avoidance, waypoint following
-- C++ nodes for performance-critical control path (odometry publisher, velocity controller, TF2 broadcaster)
+- C++ ports of performance-critical nodes (odometry publisher, velocity controller, TF2 broadcaster)
+
+**Build approach:** Python-first for every node (understand + test), then C++ port where latency matters.
+
+---
+
+#### Stage 1 Steps
+
+> Each step = implement → test on robot → understand → commit → move on.
+
+**Step 1 — Package Scaffolding** `git tag: v1.0.0-step1`
+- Create `tb3_bringup/`, `tb3_odometry/`, `tb3_navigation/` with `package.xml` + `CMakeLists.txt`
+- Verify `colcon build` succeeds with empty packages
+- _Goal: clean build, understand ROS2 package structure_
+
+**Step 2 — URDF: Robot Description** `git tag: v1.0.0-step2`
+- Write `hardware/urdf/turtlebot3_burger_sensors.urdf.xacro`
+- Defines physical frame layout: `base_link → base_scan`, `base_link → imu_link`
+- Launch `robot_state_publisher` with the URDF, verify static TF tree in RViz2
+- _Goal: understand TF2 static transforms and why the URDF is the source of truth_
+
+**Step 3 — Odometry Publisher (Python)** `git tag: v1.0.0-step3`
+- `tb3_odometry/tb3_odometry/odometry_publisher.py`
+- Subscribes to `/joint_states` (OpenCR wheel encoder ticks)
+- Integrates encoder deltas → pose (x, y, θ) using differential-drive kinematics
+- Publishes `nav_msgs/Odometry` on `/odom`
+- _Goal: understand wheel odometry math, differential drive model, `/odom` message structure_
+- _C++ port in Step 3b after verified_
+
+**Step 4 — TF2 Broadcaster (Python)** `git tag: v1.0.0-step4`
+- `tb3_odometry/tb3_odometry/tf2_broadcaster.py`
+- Subscribes to `/odom`, broadcasts dynamic TF: `odom → base_footprint`
+- Verify full chain `map → odom → base_footprint → base_link → base_scan` in RViz2
+- _Goal: understand dynamic vs static transforms, why Nav2 needs this chain_
+- _C++ port in Step 4b after verified_
+
+**Step 5 — IMU Republisher (Python)** `git tag: v1.0.0-step5`
+- `tb3_odometry/tb3_odometry/imu_republisher.py`
+- Subscribes to raw `/imu` from OpenCR, applies calibration offsets, republishes as clean `sensor_msgs/Imu`
+- _Goal: understand IMU data format, covariance matrices, sensor calibration_
+
+**Step 6 — EKF Sensor Fusion (Python)** `git tag: v1.0.0-step6`
+- `tb3_odometry/tb3_odometry/ekf_node.py` — wrapper around `robot_localization` EKF
+- Fuses `/odom` (wheel) + `/imu/data` (IMU) → `/odometry/filtered` at 50Hz
+- Compare raw vs filtered odometry trajectory in RViz2
+- _Goal: understand why wheel odometry drifts, how EKF reduces it, what covariances mean_
+
+**Step 7 — Velocity Controller (Python)** `git tag: v1.0.0-step7`
+- `tb3_odometry/tb3_odometry/velocity_controller.py`
+- Subscribes to `/cmd_vel` (geometry_msgs/Twist), converts to wheel velocities, sends to OpenCR
+- _Goal: understand Twist messages, differential-drive inverse kinematics_
+- _C++ port in Step 7b after verified_
+
+**Step 8 — Bringup Launch Files** `git tag: v1.0.0-step8`
+- `tb3_bringup/launch/robot.launch.py` — full bring-up (all drivers + odometry + TF2 + EKF)
+- `tb3_bringup/launch/sensors.launch.py` — sensor drivers only
+- `tb3_bringup/launch/slam.launch.py` — full bring-up + SLAM Toolbox
+- Teleoperate robot, verify `/odom` trajectory in RViz2
+- _Goal: understand ROS2 Python launch files, composable nodes, parameter passing_
+
+**Step 9 — SLAM Map Building** `git tag: v1.0.0-step9`
+- Configure SLAM Toolbox params in `tb3_bringup/config/slam_params.yaml`
+- Drive robot around a real room, build map, save with `map_saver_cli`
+- _Goal: understand occupancy grids, how LiDAR + odometry combine in SLAM_
+
+**Step 10 — Nav2 Autonomous Navigation** `git tag: v1.0.0-step10`
+- `tb3_navigation/launch/navigation.launch.py` — Nav2 bringup with saved map
+- `tb3_navigation/tb3_navigation/nav_goal_sender.py` — Python Nav2 action client (send single goal)
+- Send 5 waypoint goals, verify robot navigates without collision
+- _Goal: understand Nav2 stack, costmaps, action servers, behavior trees_
+
+**Step 11 — Waypoint Follower (Python)** `git tag: v1.0.0-step11`
+- `tb3_navigation/tb3_navigation/waypoint_follower.py`
+- Loads a list of goal poses from YAML, chains them as Nav2 action calls
+- _Goal: understand Nav2 NavigateToPose action interface_
+- _C++ port in Step 11b for portfolio (demonstrates rclcpp_action)_
+
+**Step 12 — C++ Ports + Final Integration** `git tag: v1.0.0` ← **milestone**
+- Port Step 3 → `tb3_odometry/src/odometry_publisher.cpp`
+- Port Step 4 → `tb3_odometry/src/tf2_broadcaster.cpp`
+- Port Step 7 → `tb3_odometry/src/velocity_controller.cpp`
+- Port Step 11 → `tb3_navigation/src/waypoint_follower.cpp`
+- Run full autonomy demo: bring-up → SLAM → navigate 5 waypoints
+- Record demo video, tag `v1.0.0`, merge `stage-1` → `main`
+
+---
 
 **Key files:**
-- `tb3_odometry/src/odometry_publisher.cpp` — wheel encoder → `/odom` in C++
-- `tb3_odometry/src/velocity_controller.cpp` — real-time `/cmd_vel` control loop
-- `tb3_navigation/src/waypoint_follower.cpp` — C++ Nav2 action client
+- `tb3_odometry/src/odometry_publisher.cpp` — wheel encoder → `/odom` in C++ (final)
+- `tb3_odometry/src/velocity_controller.cpp` — real-time `/cmd_vel` control loop (final)
+- `tb3_navigation/src/waypoint_follower.cpp` — C++ Nav2 action client (final)
 - `tb3_bringup/launch/robot.launch.py` — full system bringup
 
-**Skills demonstrated:** `Nav2` `SLAM Toolbox` `TF2` `robot_localization` `EKF` `rclcpp` `ROS2 embedded` `URDF` `sensor bring-up`
+**Skills demonstrated:** `Nav2` `SLAM Toolbox` `TF2` `robot_localization` `EKF` `rclcpp` `rclpy` `ROS2 embedded` `URDF` `sensor bring-up`
+
+---
+
+#### Stage 1 Git Workflow
+
+```
+main
+ └── stage-1          ← all Stage 1 work happens here
+      ├── commits per step (one logical change = one commit)
+      ├── tags: v1.0.0-step1 through v1.0.0-step11 (checkpoints)
+      └── v1.0.0       ← merge to main when demo video recorded
+```
+
+Commit message convention:
+```
+feat(tb3_odometry): add Python odometry publisher node
+
+- subscribes /joint_states, integrates encoder ticks
+- publishes nav_msgs/Odometry on /odom
+- tested: <5% error over 1m straight run
+```
 
 ---
 
