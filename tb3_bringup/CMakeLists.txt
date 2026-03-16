@@ -13,4 +13,12 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Install the hardware/ directory (URDF, assembly notes) into this package's
+# share folder. hardware/ has no package.xml so it can't be a standalone ROS2
+# package — we host it under tb3_bringup so get_package_share_directory()
+# can locate the URDF at runtime from any launch file.
+install(DIRECTORY ../hardware
+  DESTINATION share/${PROJECT_NAME}
+)
+
 ament_package()

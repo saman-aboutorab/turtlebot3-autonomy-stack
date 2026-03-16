@@ -4,8 +4,8 @@ description.launch.py
 Launches the robot description (URDF) via robot_state_publisher.
 
 WHAT THIS LAUNCH FILE DOES:
-  1. Finds the URDF xacro file in the hardware/ directory
-  2. Runs `xacro` to expand all <xacro:property> macros → produces plain URDF XML
+  1. Finds the URDF xacro file via get_package_share_directory()
+  2. Runs `xacro` to expand all <xacro:property> macros -> produces plain URDF XML
   3. Passes the resulting XML string to robot_state_publisher as a parameter
   4. robot_state_publisher (a C++ node) reads the XML and publishes:
        - /robot_description topic (the raw URDF string, used by RViz2)
@@ -16,8 +16,18 @@ HOW THE C++ SIDE WORKS (robot_state_publisher internals):
   robot_state_publisher is a well-tested C++ ROS2 node from Robotis/OSRF.
   It uses the KDL (Kinematics and Dynamics Library) to parse the URDF XML,
   extract the kinematic chain, and efficiently broadcast TF2 transforms.
-  Writing this from scratch in C++ ourselves is unnecessary — this is the
+  Writing this from scratch in C++ ourselves is unnecessary -- this is the
   right tool for the job. Our C++ nodes come in Steps 3, 4, 7, 12.
+
+WHY get_package_share_directory() NOT __file__:
+  After `colcon build`, all launch files are installed (or symlinked) into:
+    install/<package>/share/<package>/launch/
+  Using __file__ or os.getcwd() is fragile because the file is no longer
+  next to the source tree. get_package_share_directory('tb3_bringup') always
+  returns the correct installed path regardless of where you run the command.
+  The URDF is installed there too via CMakeLists.txt:
+    install(DIRECTORY ../hardware DESTINATION share/tb3_bringup)
+  -> install/tb3_bringup/share/tb3_bringup/hardware/urdf/...
 
 USAGE:
   ros2 launch tb3_bringup description.launch.py
@@ -36,23 +46,22 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, Command
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
 
     # --- 1. Locate the URDF xacro file ---
-    # get_package_share_directory finds the installed share/ location for a package.
-    # After `colcon build`, files in install() directives end up under:
-    #   install/<package>/share/<package>/...
-    # For hardware/, we use the workspace path directly since hardware/ is not
-    # a ROS package — it doesn't have a package.xml.
-    pkg_dir = os.path.join(
-        os.path.dirname(__file__),   # this launch file's directory
-        '..', '..', '..',            # up to workspace root
-        'hardware', 'urdf',
-        'turtlebot3_burger_sensors.urdf.xacro'
+    # get_package_share_directory('tb3_bringup') returns:
+    #   install/tb3_bringup/share/tb3_bringup/
+    # hardware/ is installed there by CMakeLists.txt:
+    #   install(DIRECTORY ../hardware DESTINATION share/${PROJECT_NAME})
+    # So the URDF ends up at:
+    #   install/tb3_bringup/share/tb3_bringup/hardware/urdf/turtlebot3_burger_sensors.urdf.xacro
+    pkg_share = get_package_share_directory('tb3_bringup')
+    default_urdf = os.path.join(
+        pkg_share, 'hardware', 'urdf', 'turtlebot3_burger_sensors.urdf.xacro'
     )
-    default_urdf = os.path.normpath(pkg_dir)
 
     # --- 2. Declare a launch argument so the URDF path can be overridden ---
     # This is the ROS2 way to make launch files configurable from CLI:
@@ -73,9 +82,14 @@ def generate_launch_description():
         name='robot_state_publisher',
         output='screen',
         parameters=[{
-            # Command() evaluates at launch time: runs `xacro <urdf_file>`
-            'robot_description': Command(['xacro ', LaunchConfiguration('urdf_file')]),
-            # Publish TF at 50Hz — matches our future odometry rate
+            # ParameterValue(..., value_type=str) tells the launch system not to
+            # try to parse the xacro output as YAML -- treat it as a raw string.
+            # Command() runs `xacro <file>` and captures stdout as the value.
+            'robot_description': ParameterValue(
+                Command(['xacro ', LaunchConfiguration('urdf_file')]),
+                value_type=str
+            ),
+            # Publish TF at 50Hz -- matches our future odometry rate
             'publish_frequency': 50.0,
         }]
     )
