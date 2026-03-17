@@ -11,6 +11,7 @@
   - [Step 1 — Package Scaffolding](#step-1--package-scaffolding)
   - [Step 2 — URDF Robot Description](#step-2--urdf-robot-description)
   - [Step 3 — Odometry Publisher](#step-3--odometry-publisher)
+  - [Step 4 — TF2 Broadcaster](#step-4--tf2-broadcaster)
 
 ---
 
@@ -371,5 +372,112 @@ OpenCR firmware (hardware)
 Keeping each concern in its own node makes each one independently testable and replaceable.
 
 ---
+
+---
+
+## Step 4 — TF2 Broadcaster
+
+**Goal:** Bridge the `/odom` message into the TF2 transform tree by broadcasting the dynamic `odom → base_footprint` transform.
+
+### Topics vs the TF2 tree — two different systems
+
+After Step 3, the robot's pose exists as a stream of `nav_msgs/Odometry` messages on `/odom`. But Nav2, SLAM Toolbox, and RViz2 don't subscribe to `/odom` directly. They consume the **TF2 transform tree** — a different, queryable system.
+
+| `/odom` topic | TF2 transform tree |
+|---|---|
+| A message stream — subscribe and receive one at a time | A database — query any frame pair at any time from any node |
+| Pull model: you wait for the next message | Push + pull: nodes broadcast transforms, others look them up |
+| Used by the EKF, odometry consumers | Used by Nav2, SLAM, RViz2, sensor fusion |
+
+The TF2 broadcaster's job is to translate between these two systems: read from `/odom`, write to `/tf`.
+
+### Static vs Dynamic transforms — recap
+
+| Type | Broadcast to | When | Example |
+|---|---|---|---|
+| Static | `/tf_static` (latched) | Once at startup | `base_link → base_scan` (LiDAR never moves) |
+| Dynamic | `/tf` | Continuously, every update | `odom → base_footprint` (robot moves) |
+
+`robot_state_publisher` (Step 2) handled all the static transforms from the URDF. This node handles the one dynamic transform that changes as the robot moves.
+
+### Why this is a separate node from the odometry publisher
+
+In Step 6 (EKF), the filtered pose (`/odometry/filtered`) is more accurate than raw `/odom`. We want the TF tree to use the filtered pose. Because the broadcaster is a separate node, we simply change one parameter — which topic it subscribes to — and the entire TF tree automatically uses the better estimate. The odometry publisher stays completely unchanged.
+
+```
+Step 4 (now):  /odom             → tf2_broadcaster → odom → base_footprint
+Step 6 (later): /odometry/filtered → tf2_broadcaster → odom → base_footprint
+```
+
+### `TransformBroadcaster` — not a regular publisher
+
+```python
+self.broadcaster = tf2_ros.TransformBroadcaster(self)
+self.broadcaster.sendTransform(transform)
+```
+
+`TransformBroadcaster` is a thin wrapper around a publisher on the `/tf` topic. It is NOT created with `self.create_publisher()` — it manages its own internal publisher. You call `sendTransform(TransformStamped)` and it handles the rest. The TF buffer in every other node (including `tf2_checker` from Step 2) will receive and cache these broadcasts automatically via their `TransformListener`.
+
+### Why timestamp comes from the odom message, not `now()`
+
+```python
+t.header.stamp = odom.header.stamp   # correct
+# t.header.stamp = self.get_clock().now().to_msg()  # wrong
+```
+
+The TF2 system is time-indexed. When Nav2 asks "where was the robot at time T?", the TF buffer looks up the transform that was valid at exactly time T. If we timestamp the transform with `now()` instead of the odom message's timestamp, there is a small but nonzero gap between when the pose was computed and when it was stamped. Under high load on a slow RPi4, this gap can be tens of milliseconds — enough for the TF lookup to fail with "extrapolation into the future" errors. Always use the source message's timestamp.
+
+### `_odom_to_transform()` — pure conversion, no state
+
+```python
+def _odom_to_transform(self, odom: Odometry) -> TransformStamped:
+    t = TransformStamped()
+    t.header.stamp    = odom.header.stamp
+    t.header.frame_id = odom.header.frame_id       # 'odom'
+    t.child_frame_id  = odom.child_frame_id        # 'base_footprint'
+    t.transform.translation.x = odom.pose.pose.position.x
+    t.transform.translation.y = odom.pose.pose.position.y
+    t.transform.translation.z = 0.0
+    t.transform.rotation = odom.pose.pose.orientation
+    return t
+```
+
+This method has no side effects and no internal state — given the same input, it always returns the same output. This makes it trivially unit-testable without a running ROS2 system, a broadcaster, or any timing concerns. The actual `sendTransform()` call is in `odom_callback()`, kept separate so tests don't need to send anything to the middleware.
+
+`z = 0.0` is hardcoded because `base_footprint` is defined as the floor-level projection of the robot — it is always at z=0 by definition, regardless of what the odometry message says.
+
+### The complete TF chain after Step 4
+
+```
+/tf_static (from robot_state_publisher, Step 2):
+  base_footprint → base_link     (fixed, +10mm up)
+  base_link → base_scan          (fixed, LiDAR position)
+  base_link → imu_link           (fixed, IMU position)
+  base_link → wheel_*_link       (updated from /joint_states)
+
+/tf (from tf2_broadcaster, Step 4):
+  odom → base_footprint          (dynamic, updates with /odom)
+
+Full chain:
+  odom → base_footprint → base_link → base_scan
+                                    → imu_link
+```
+
+SLAM Toolbox (Step 9) will add `map → odom` to the top of this chain. At that point, the complete path `map → odom → base_footprint → base_link → base_scan` allows SLAM to project every laser hit from sensor frame all the way into map frame.
+
+### Data flow for Steps 3 + 4 combined
+
+```
+OpenCR firmware
+  └── /joint_states
+        └── odometry_publisher.py
+              ├── differential-drive kinematics
+              ├── integrate pose (x, y, theta)
+              └── /odom  (nav_msgs/Odometry)
+                    └── tf2_broadcaster.py
+                          └── TransformBroadcaster.sendTransform()
+                                └── /tf  (odom → base_footprint)
+                                      └── cached in TF buffer of every node
+```
 
 *More steps to be added as the project progresses.*
