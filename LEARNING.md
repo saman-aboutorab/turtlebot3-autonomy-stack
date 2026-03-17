@@ -27,6 +27,14 @@ Branch: `stage-1` | Milestone tag: `v1.0.0`
 
 **Goal:** Create the three ROS2 packages and get `colcon build` to pass before writing any robot logic.
 
+### Simple analogy
+
+Think of a ROS2 package like a **drawer in a toolbox**.
+
+Each drawer (package) has a label on the front saying what's inside and what tools it needs to work (`package.xml`). Inside are the actual tools — scripts, configs, launch files. The toolbox itself (`install/`) is what you open when you want to use something; the workshop bench (`src/`) is where you build and modify tools.
+
+You wouldn't throw all your tools into one giant drawer. Similarly, we split into three packages: `tb3_odometry` (sensing), `tb3_navigation` (planning), `tb3_bringup` (wiring them together). If the navigation drawer breaks, you can fix it without touching the sensing drawer.
+
 ### What is a ROS2 package?
 
 A package is the basic unit of organisation in ROS2. It is a directory containing at minimum:
@@ -106,6 +114,17 @@ After `source install/setup.bash`, `ros2 run` and `ros2 launch` search the `inst
 ## Step 2 — URDF Robot Description
 
 **Goal:** Describe the robot's physical geometry so ROS2 knows where each sensor is. Verify the TF2 transform tree is correct.
+
+### Simple analogy
+
+Imagine you hired a delivery driver who has never seen your building. You tell them: *"The front door is at ground level. The mailroom is 10 metres inside and 5 metres to the left. The loading dock is out back, 20 metres behind the front door."*
+
+That description is the URDF. The driver (SLAM, Nav2, RViz2) now knows the layout and can reason about where things are relative to each other — without ever having physically seen the building.
+
+Without it, SLAM would receive laser hits from the LiDAR and have no idea whether those hits came from 17cm above the robot or from ground level. It would be like trying to map a building when your laser pointer could be anywhere.
+
+**Concrete example from our robot:**
+The LiDAR is mounted 172mm above and 32mm behind the robot's centre. When the LiDAR says "there's a wall 50cm ahead," SLAM uses the URDF to work out that this measurement came from a point that is 50cm + 32mm ahead of the robot's centre, and 172mm up. Without that offset, the wall appears in the wrong place in the map.
 
 ### What is URDF?
 
@@ -237,6 +256,22 @@ Identity (no rotation) = `(0, 0, 0, 1)`. The `w=0.707, z=-0.707` you see on the 
 ## Step 3 — Odometry Publisher
 
 **Goal:** Read wheel encoder ticks from `/joint_states`, apply differential-drive kinematics, publish the robot's estimated pose as `nav_msgs/Odometry` on `/odom`.
+
+### Simple analogy
+
+Imagine you're **blindfolded, counting your steps** as you walk across a room.
+
+- You know your stride is roughly 75cm.
+- You count 10 steps forward → you estimate you're 7.5m ahead of where you started.
+- You count 3 steps while turning right → you estimate your heading changed by ~30°.
+
+You never looked up. You never checked a map. You just integrated your own motion over time. That's odometry.
+
+The problem: if you slip on a rug (wheel slip), your step count is wrong and your estimate drifts. After 50 steps, you might think you're 37.5m ahead but you're actually only 35m. The error grows with distance. That's why we add the IMU (Step 5) and EKF (Step 6) — a second opinion that doesn't depend on your steps.
+
+**Concrete example:**
+Both wheels rotate 1 radian. `dist = 1.0 × 0.033m = 0.033m`. Robot moved 3.3cm forward. Simple.
+Right wheel rotates 1 rad, left stays still. `angular = (0.033 - 0) / 0.160 = 0.206 rad`. Robot turned ~12° left.
 
 ### What is odometry?
 
@@ -380,6 +415,22 @@ Keeping each concern in its own node makes each one independently testable and r
 
 **Goal:** Bridge the `/odom` message into the TF2 transform tree by broadcasting the dynamic `odom → base_footprint` transform.
 
+### Simple analogy
+
+Think of `/odom` like a **private text message** from the odometry node: "hey, the robot is now at position (1.2, 0.3)." Only nodes that subscribe to that specific topic receive it, and they receive it as a stream — one message at a time, in order.
+
+The TF2 tree is like a **public noticeboard** that anyone can walk up to and query at any time: "excuse me, where is `base_scan` relative to `odom` right now?" The noticeboard gives you the answer instantly, and it can also chain transforms automatically — if you ask "where is `base_scan` relative to `map`?" it multiplies four transforms together for you without you having to know the chain.
+
+The TF2 broadcaster's job is to **take the private text and pin it to the noticeboard** — same information, different system, different audience.
+
+**Concrete example:**
+After this step:
+- SLAM can ask: "where is the LiDAR in the odom frame?" → TF chains `odom→base_footprint→base_link→base_scan`
+- RViz2 can ask: "where should I draw the robot model?" → same chain
+- Nav2 can ask: "how far is the robot from the goal?" → same chain
+
+None of those systems subscribe to `/odom`. They all use the noticeboard.
+
 ### Topics vs the TF2 tree — two different systems
 
 After Step 3, the robot's pose exists as a stream of `nav_msgs/Odometry` messages on `/odom`. But Nav2, SLAM Toolbox, and RViz2 don't subscribe to `/odom` directly. They consume the **TF2 transform tree** — a different, queryable system.
@@ -486,6 +537,41 @@ OpenCR firmware
 ## Step 5 — IMU Republisher
 
 **Goal:** Take the raw `sensor_msgs/Imu` from the OpenCR board, fix its metadata (frame_id and covariance matrices), and republish on `/imu/data` so the EKF can consume it correctly.
+
+### Simple analogy — what is an IMU?
+
+Imagine you're **blindfolded in the back seat of a car**. You can't see anything outside. But you can still *feel*:
+
+- When the car accelerates forward — you get pushed back into the seat *(accelerometer)*
+- When it brakes — you lurch forward *(accelerometer)*
+- When it turns left — you slide right in the seat *(gyroscope)*
+
+That's exactly what an IMU does. It *feels* motion without needing to see anything external.
+
+**Why do we need it alongside wheel odometry?**
+
+Wheel odometry counts steps. But it can't detect wheel slip — if the wheel spins on a smooth floor without gripping, the encoder counts ticks but the robot didn't actually move. The odometry is now wrong and doesn't know it.
+
+The gyroscope doesn't care about wheels. It physically *feels* the rotation. If the wheels slipped during a turn, the gyroscope still gives you the correct rotation angle.
+
+Think of them as two people navigating the same blindfolded walk:
+- Person A (odometry): counts steps carefully, but occasionally slips on ice without noticing
+- Person B (IMU): feels every turn and acceleration, but their sense of direction drifts after a long time
+
+The EKF (Step 6) is the **third person** who listens to both and produces a better estimate than either alone. Person A is more reliable going straight, Person B is more reliable turning. Together they cover each other's weaknesses.
+
+**Concrete example:**
+Robot drives straight, then wheels slip sideways on a shiny tile:
+- Odometry says: "I moved 20cm forward" ✓ (straight part was fine)
+- Odometry says: "I didn't turn at all" ✗ (didn't feel the sideways slip)
+- Gyroscope says: "I rotated 5° to the left" ✓ (felt the slip physically)
+- EKF blends both → "you moved ~20cm forward and rotated ~5° left" ✓
+
+### What this node specifically does
+
+The raw IMU data from the OpenCR is *correct* — the measurements are fine. But two pieces of metadata are broken: the `frame_id` is empty and the covariance matrices are all zeros. This node fixes only those two things. The numbers pass through untouched.
+
+It's like receiving a correctly-filled-out form but the sender forgot to write their name and department. The data is right — you just need to stamp it with the right labels before filing it.
 
 ### What the MPU-9250 measures
 
