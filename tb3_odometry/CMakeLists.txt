@@ -20,7 +20,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   tb3_odometry/tf2_checker.py           # Step 2 — verify URDF TF tree
   tb3_odometry/odometry_publisher.py   # Step 3 — wheel encoder → /odom
-  # tb3_odometry/tf2_broadcaster.py     # added in Step 4
+  tb3_odometry/tf2_broadcaster.py      # Step 4 — /odom → TF odom→base_footprint
   # tb3_odometry/imu_republisher.py     # added in Step 5
   # tb3_odometry/ekf_node.py            # added in Step 6
   # tb3_odometry/velocity_controller.py # added in Step 7
