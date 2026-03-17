@@ -683,105 +683,320 @@ A production IMU pipeline would include calibration correction. For Stage 1, the
 
 **Goal:** Fuse wheel odometry (`/odom`) and IMU heading (`/imu/data`) into a single, better pose estimate on `/odometry/filtered`. Update `tf2_broadcaster` to use the filtered output for TF2.
 
+---
+
+### High-level overview
+
+You have two sensors. Both estimate the robot's pose, but each fails in a different way:
+
+| Sensor | What it measures | How it fails |
+|---|---|---|
+| Wheel odometry (`/odom`) | Counts rotations → integrates x, y, θ | Heading error compounds: small drift → large position error over distance |
+| IMU (`/imu/data`) | Absolute orientation from DMP fusion | Noisy moment-to-moment; gives no information about x or y |
+
+The EKF's job: **produce one estimate that is better than either sensor alone**.
+
+It runs a two-step loop every time `/odom` arrives:
+
+1. **Predict** — apply the motion model to advance the state using the wheel velocities
+2. **Correct** — pull the predicted heading toward the IMU reading, weighted by how much each source is trusted
+
+The weight is computed automatically from the covariance matrices. You do not tune it manually — you just set how noisy each sensor is (`Q` and `R`), and the filter figures out the optimal blend.
+
+---
+
 ### Simple analogy
 
-Imagine you are navigating in fog, and you have two sources of information:
+Imagine navigating in fog with two tools:
 
-1. **A pedometer** (wheel odometry) — counts your steps and direction. Accurate over short distances, but any error in your heading compounds: if you are off by 2°, after 50 steps you are visibly in the wrong place.
-2. **A compass** (IMU heading) — gives your absolute facing direction. Not affected by step-counting errors, but has its own small noise.
+1. **A pedometer** (wheel odometry) — counts your steps and direction. Works well over short distances, but if your compass is off by even 2°, after 50 steps you are visibly in the wrong place. The error grows with every step.
+2. **A compass** (IMU heading) — gives your absolute facing direction at any moment. Not affected by step-counting errors, but jiggles slightly with every bump.
 
-A Kalman filter is a **trust allocator**: it continuously asks "how confident am I in each source?" and blends them in proportion to that confidence. If the pedometer is drifting badly (high uncertainty), it leans on the compass. If the compass just gave a noisy reading, it leans on the pedometer.
+A Kalman filter is a **trust allocator**. It continuously asks "how confident am I in each source right now?" and blends them proportionally. If the pedometer has been drifting for a while (high uncertainty P), lean on the compass. If the compass just gave a noisy reading (high R), lean on the pedometer.
 
-The "Extended" part just means the motion model is non-linear (cos/sin of heading), so we need to linearise it at each step using calculus (the Jacobian). Everything else is the same as a regular Kalman filter.
+The result: heading error stays *bounded* instead of growing forever, and position accuracy is dramatically better over long distances.
 
-### Concrete example
+---
 
-Robot drives 3 m in a straight line:
+### Concrete example with real numbers
 
-| Source alone | Heading drift | End position error |
-|---|---|---|
-| Wheel odometry | ~3° (typical wheel slip) | ~16 cm sideways |
-| EKF (odom + IMU) | ~0.5° | ~3 cm sideways |
+Robot drives 5 m in a straight line. Left wheel is slightly slippery → heading drifts 3°.
 
-The IMU correction happens ~50 times per second, pulling the heading estimate back toward the true value every time. Error stays bounded instead of growing without limit.
+**Without EKF (raw odometry only):**
+- Heading error: 3°
+- Lateral position error after 5 m: `5 × sin(3°) ≈ 26 cm`
+- After 20 m: over 1 m off — the robot misses doorways and obstacles
+
+**With EKF (odom + IMU):**
+- IMU corrects heading 50 times per second
+- Residual heading error: ~0.5°
+- Lateral position error after 5 m: `5 × sin(0.5°) ≈ 4 cm`
+
+The gain comes entirely from fixing heading early. Position error is the *integral* of heading error, so a small, bounded heading error produces a small, bounded position error.
+
+---
 
 ### What is a Kalman filter, really?
 
-Think of it as a physicist who maintains a "best estimate" and "how confident am I?" about where the robot is. Every step has two phases:
+Think of it as a scientist who maintains two things: a **best estimate** and a **confidence level** about where the robot is. Every time the odometry fires, the scientist runs two steps:
 
-**PREDICT** — "Based on the wheel velocities, where should the robot be now?"
+#### PREDICT
+
+"Based on the wheel velocities, where should the robot be now?"
+
 ```
-x_new = x + v * cos(θ) * dt      ← x moves forward along heading
-y_new = y + v * sin(θ) * dt      ← y moves sideways along heading
-θ_new = θ + ω * dt               ← heading rotates
+x_new = x + v * cos(θ) * dt      ← move forward along current heading
+y_new = y + v * sin(θ) * dt      ← move sideways along current heading
+θ_new = θ + ω * dt               ← rotate by angular velocity × time
 ```
-Confidence shrinks (covariance P grows) because time passed and wheels slip.
 
-**CORRECT** — "The IMU says θ = 0.52 rad. My prediction says θ = 0.48 rad. How much should I adjust?"
+The scientist also updates their confidence:
 
-The Kalman gain K answers this:
+```
+P_new = F * P * F^T + Q
+```
+
+- `F * P * F^T` — stretches the old uncertainty through the motion model's Jacobian
+- `+ Q` — adds process noise: even if we were perfectly confident, driving a bit makes us less sure (wheels slip)
+
+Confidence *decreases* during prediction — time passing always increases uncertainty.
+
+#### CORRECT
+
+"The IMU says θ = 0.52 rad. My prediction says θ = 0.48 rad. How much should I move my estimate?"
+
+Step 1 — compute the **Kalman gain** K:
 ```
 K = P * H^T * (H * P * H^T + R)^{-1}
 ```
-- `P` = how uncertain am I? (larger → trust the measurement more)
-- `R` = how noisy is the measurement? (larger → trust it less)
+- `P` is our prediction uncertainty: larger P → we trust IMU more → K is larger
+- `R` is IMU noise: larger R → we trust IMU less → K is smaller
+- `H = [0, 0, 1]` — selects just the heading component of the state
 
-Then update:
+Step 2 — **update** state and confidence:
 ```
-state = state + K * (measurement − prediction)   ← pull toward measurement
-P     = (I − K * H) * P                          ← confidence grows
+innovation = θ_imu − θ_pred              ← how surprising is the measurement?
+state      = state + K * innovation      ← pull estimate toward measurement
+P          = (I − K * H) * P            ← confidence grows (uncertainty shrinks)
 ```
 
-### The 3-DOF state vector
+If K is large → the IMU reading moves the estimate a lot.
+If K is small → the IMU barely changes the estimate, prediction wins.
 
-We track three numbers: `[x, y, θ]` (position + heading). We do NOT track velocities in the state — they come directly from the odometry message as "control inputs" `(v, ω)`.
+Confidence *increases* after correction — new data always reduces uncertainty.
 
-Why 3-DOF and not 6? The robot moves on a flat floor. There is no z, roll, or pitch. Keeping the state small keeps the math fast and the code readable.
+---
 
 ### Why "Extended" Kalman Filter?
 
-A standard Kalman filter only works if the motion model is linear (i.e., a matrix multiplication). Our model involves `cos(θ)` and `sin(θ)` — non-linear.
+A standard Kalman filter requires a **linear** motion model (a matrix multiplication). Our model contains `cos(θ)` and `sin(θ)` — non-linear.
 
-The EKF solution: at each prediction step, compute the Jacobian (partial derivatives) of the motion model with respect to the state. This gives the best linear approximation at the current operating point:
+The EKF fix: at every prediction step, linearise the model around the current state by computing the Jacobian (partial derivatives of the model with respect to the state):
 
 ```
-F = [[1, 0, -v * sin(θ) * dt],
-     [0, 1,  v * cos(θ) * dt],
-     [0, 0,  1              ]]
+F = d(motion model) / d(state)  =
+
+    [[1,  0,  -v * sin(θ) * dt],    ← how x_new changes if x, y, θ change
+     [0,  1,   v * cos(θ) * dt],    ← how y_new changes
+     [0,  0,   1              ]]    ← how θ_new changes
 ```
 
-We re-compute F every step because θ changes. This is the "extended" part.
+We recompute `F` at every step because θ changes. This local linearisation is what makes it "Extended" — everything else is a standard Kalman filter.
+
+---
+
+### The 3-DOF state vector
+
+```python
+self._state = np.zeros(3)   # [x_pos, y_pos, theta]
+```
+
+We track three numbers: position (x, y) and heading (θ). We do **not** include velocities in the state. The velocities `v` and `ω` come directly from the odometry message each step as "control inputs" — no need to estimate them separately.
+
+Why not 6-DOF? The robot moves on a flat floor. z, roll, and pitch are always zero. Keeping the state small keeps the maths fast and the code readable. A 6×6 EKF would add complexity with no benefit here.
+
+---
+
+### Detailed code walkthrough
+
+#### Initialisation — matrices built once at startup
+
+```python
+# State starts at origin with large uncertainty
+self._state = np.zeros(3)        # [x=0, y=0, θ=0]
+self._P     = np.eye(3) * 1.0   # 1 m² / 1 rad² — "I have no idea where I am"
+
+# Process noise Q — how much we distrust the motion model per step
+# Diagonal: [x uncertainty, y uncertainty, heading uncertainty]
+self._Q = np.diag([proc_pos, proc_pos, proc_heading])
+
+# Measurement noise R — how noisy the IMU heading is (1×1 scalar)
+self._R = np.array([[meas_imu]])
+
+# Measurement model H: maps 3D state to scalar heading observation
+# [0, 0, 1] means "look at element 2 of the state (theta)"
+self._H = np.array([[0.0, 0.0, 1.0]])
+```
+
+`P`, `Q`, and `R` are the three knobs you tune. In practice:
+- Make `Q` larger → predict conservatively, rely on measurements more
+- Make `R` larger → IMU is noisy, rely on prediction more
+- Start `P` large → the filter will converge quickly once measurements arrive
+
+---
+
+#### _imu_callback — just stores the latest heading
+
+```python
+def _imu_callback(self, msg: Imu) -> None:
+    self._imu_heading   = self._yaw_from_quaternion(msg.orientation)
+    self._imu_available = True
+```
+
+The IMU fires at ~50 Hz. We do **not** run the EKF correction here. We just store the latest heading. The correction runs inside `_odom_callback`, which fires at the odometry rate (~30 Hz). This prevents the filter from over-weighting the IMU by correcting 50 times between every odometry update.
+
+---
+
+#### _odom_callback — the main EKF loop
+
+```python
+def _odom_callback(self, msg: Odometry) -> None:
+    t  = stamp.sec + stamp.nanosec * 1e-9
+    dt = t - self._last_odom_time       # time since last message
+
+    v = msg.twist.twist.linear.x        # linear velocity from odometry
+    w = msg.twist.twist.angular.z       # angular velocity from odometry
+
+    self._state, self._P = self._predict(self._state, self._P, v, w, dt)
+
+    if self._imu_available:
+        self._state, self._P = self._correct(self._state, self._P, self._imu_heading)
+
+    self._publish_filtered(stamp)
+```
+
+The velocities `v` and `w` come from the odometry message's `twist` field — this is exactly what `odometry_publisher.py` filled in from the encoder kinematics. We use them as control inputs to the EKF instead of recomputing kinematics from scratch.
+
+---
+
+#### _predict — motion model + Jacobian
+
+```python
+# Non-linear motion model (same equations as odometry_publisher.py)
+x_new     = x + v * math.cos(theta) * dt
+y_new     = y + v * math.sin(theta) * dt
+theta_new = theta + w * dt
+theta_new = math.atan2(math.sin(theta_new), math.cos(theta_new))  # normalise to [-π, π]
+
+# Jacobian of the motion model — re-computed every step because theta changes
+F = np.array([
+    [1.0, 0.0, -v * math.sin(theta) * dt],   # d(x_new)/d(x, y, θ)
+    [0.0, 1.0,  v * math.cos(theta) * dt],   # d(y_new)/d(x, y, θ)
+    [0.0, 0.0,  1.0                      ],  # d(θ_new)/d(x, y, θ)
+])
+
+# Covariance propagation: P grows (prediction adds uncertainty)
+P_new = F @ P @ F.T + self._Q
+```
+
+Notice the off-diagonal terms in F: `−v·sin(θ)·dt` and `+v·cos(θ)·dt`. These encode the geometric fact that a heading error causes a position error in the perpendicular direction. The Jacobian lets the covariance matrix reflect this coupling correctly.
+
+---
+
+#### _correct — Kalman gain and state update
+
+```python
+# Innovation: how far off is our prediction from the IMU reading?
+# atan2(sin(Δ), cos(Δ)) handles the ±π wraparound correctly
+innovation = math.atan2(
+    math.sin(theta_imu - theta_pred),
+    math.cos(theta_imu - theta_pred)
+)
+
+# Innovation covariance S = H * P * H^T + R  (1×1 scalar)
+S = H @ P @ H.T + R
+
+# Kalman gain K = P * H^T * S^{-1}   (3×1 vector)
+# K[0]: how much to adjust x per radian of innovation
+# K[1]: how much to adjust y per radian of innovation
+# K[2]: how much to adjust θ per radian of innovation
+K = P @ H.T @ np.linalg.inv(S)
+
+# State update: pull toward the measurement
+state_new = state + K.flatten() * innovation
+
+# Covariance update: we got new information, so we are more confident
+P_new = (I - K @ H) @ P
+```
+
+Why does `K` have x and y components even though the IMU only measures θ? Because `P` has off-diagonal terms coupling x, y, and θ. If the filter knows "x and θ are correlated" (because they are — heading errors cause x errors), then a heading correction can also slightly adjust x. With a diagonal P (as at startup), K[0] and K[1] are zero and only θ is corrected.
+
+The angle wraparound fix (`atan2(sin(Δ), cos(Δ))`) is critical. Without it, if the robot is facing θ=3.1 rad and the IMU says −3.1 rad (same direction, opposite sign), the raw difference would be −6.2 rad and the correction would violently spin the estimated heading the wrong way.
+
+---
+
+#### _publish_filtered — mapping 3×3 P into the 6×6 covariance
+
+```python
+# nav_msgs/Odometry uses 6-DOF order: [x, y, z, roll, pitch, yaw]
+# We track [x, y, yaw] — indices 0, 1, 5 in that order
+cov     = [0.0] * 36
+cov[0]  = P[0, 0]   # x-x
+cov[1]  = P[0, 1]   # x-y
+cov[5]  = P[0, 2]   # x-yaw
+cov[6]  = P[1, 0]   # y-x
+cov[7]  = P[1, 1]   # y-y
+cov[11] = P[1, 2]   # y-yaw
+cov[30] = P[2, 0]   # yaw-x
+cov[31] = P[2, 1]   # yaw-y
+cov[35] = P[2, 2]   # yaw-yaw
+```
+
+The `nav_msgs/Odometry` covariance is a 6×6 matrix (36 values) for `[x, y, z, roll, pitch, yaw]`. Our EKF only tracks 3 of those 6 DOF, so we zero-fill the rest and splice our 3×3 P into the correct positions. Downstream nodes (Nav2, SLAM) use this covariance to know how much to trust the pose.
+
+---
+
+### What changed in tf2_broadcaster (Step 6)
+
+In Step 4, `tf2_broadcaster.py` subscribed to `/odom` (raw wheel odometry). In Step 6 it now subscribes to `/odometry/filtered` (EKF output). This means the TF2 transform — which every downstream node uses to locate the robot — now benefits from the fused heading estimate.
+
+An `input_topic` parameter lets you revert to `/odom` for debugging:
+```bash
+ros2 run tb3_odometry tf2_broadcaster.py --ros-args -p input_topic:=/odom
+```
+
+---
 
 ### Data flow
 
 ```
-/odom  (nav_msgs/Odometry, wheel encoder pose + velocities)
-  └── ekf_node.py
-        ├── PREDICT: apply motion model (v, ω) → state, P grows
-        │
-/imu/data  (sensor_msgs/Imu, IMU heading from DMP)
-  └── ekf_node.py (stored, used in next correction)
-        └── CORRECT: Kalman gain → pull heading toward IMU
-              └── /odometry/filtered  (nav_msgs/Odometry, fused estimate)
-                    └── tf2_broadcaster.py  (Step 6 change: uses filtered pose)
-                          └── /tf  (odom → base_footprint, better heading accuracy)
+OpenCR
+  ├── /joint_states → odometry_publisher.py → /odom
+  │                                               │
+  │   ekf_node.py ←────────────────────────────── │ (PREDICT: v, ω from twist)
+  │       │                                        │
+  └── /imu → imu_republisher.py → /imu/data       │
+                                       │           │
+                             ekf_node.py ← ────────┘ (stored for CORRECT step)
+                                 │
+                                 └── /odometry/filtered
+                                           │
+                                     tf2_broadcaster.py
+                                           │
+                                          /tf  (odom → base_footprint)
+                                           │
+                              SLAM / Nav2 / RViz
 ```
 
-### What changed in tf2_broadcaster (Step 6)
-
-In Step 4, `tf2_broadcaster.py` subscribed to `/odom` (raw wheels). In Step 6 it now subscribes to `/odometry/filtered` (EKF output). This means the TF2 transform — which all downstream nodes (SLAM, Nav2, RViz) use to locate the robot — now benefits from the fused estimate.
-
-An `input_topic` parameter lets you revert to `/odom` for debugging:
-```
-ros2 run tb3_odometry tf2_broadcaster.py --ros-args -p input_topic:=/odom
-```
+---
 
 ### What this node deliberately does NOT do
 
-- Does **not** fuse GPS or position measurements (we only correct heading)
-- Does **not** handle sensor dropout gracefully (if `/imu/data` stops, it predicts-only)
-- Does **not** initialise pose from a known starting position (always starts at origin)
+- Does **not** fuse position measurements (only heading). x and y are corrected indirectly through the covariance coupling, not directly observed.
+- Does **not** handle IMU dropout gracefully. If `/imu/data` stops arriving, the filter runs predict-only and heading drift returns.
+- Does **not** initialise from a known pose. Always starts at origin `[0, 0, 0]`.
+- Does **not** implement the Joseph form of the covariance update (`(I−KH)P(I−KH)^T + KRK^T`) for numerical stability. The simpler form `(I−KH)P` is sufficient for this application.
 
-A production EKF (e.g., `robot_localization`) handles all of these. Our implementation keeps the math visible so you understand what is happening before adding that complexity.
+A production EKF (e.g., `robot_localization`) handles all of these. Our implementation keeps the maths visible so you understand what is happening before using a black-box solution.
 
 *More steps to be added as the project progresses.*
