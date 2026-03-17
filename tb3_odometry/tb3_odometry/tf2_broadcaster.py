@@ -2,32 +2,42 @@
 """
 tf2_broadcaster.py
 ==================
-Subscribes to /odom (nav_msgs/Odometry) and broadcasts the dynamic TF2
-transform odom -> base_footprint.
+Subscribes to /odometry/filtered (nav_msgs/Odometry from the EKF) and
+broadcasts the dynamic TF2 transform odom -> base_footprint.
 
 WHY THIS IS A SEPARATE NODE FROM odometry_publisher.py:
   The odometry publisher computes the pose and publishes it as a ROS2 message.
   This node bridges that message into the TF2 system.
-  Keeping them separate means in Step 6 we can swap to broadcasting from the
-  EKF filtered output (/odometry/filtered) instead of raw /odom — without
-  touching the odometry publisher at all.
+  Keeping them separate means we could swap the input source (raw /odom vs
+  EKF /odometry/filtered) without touching the odometry publisher at all.
+
+WHY WE USE /odometry/filtered (Step 6 change):
+  In Step 4, we broadcast the raw wheel odometry (/odom) directly to TF2.
+  In Step 6, the EKF fuses wheel odometry + IMU to produce a better heading
+  estimate on /odometry/filtered. We now use that filtered pose for TF2
+  so that all downstream nodes (SLAM, Nav2) benefit from the improved estimate.
+
+  The input_topic parameter lets you revert to /odom for debugging if needed.
 
 STATIC vs DYNAMIC TRANSFORMS:
   - Static (robot_state_publisher, Step 2): frames that never move relative
     to each other (base_link -> base_scan). Broadcast once to /tf_static.
   - Dynamic (this node): frames that move over time (odom -> base_footprint).
-    Broadcast continuously to /tf on every /odom message.
+    Broadcast continuously to /tf on every incoming odometry message.
 
 THE TRANSFORM WE BROADCAST:
-  parent frame: odom          (the fixed world reference frame)
+  parent frame: odom           (the fixed world reference frame)
   child frame:  base_footprint (the robot's floor-level frame)
-  value:        the robot's current x, y, yaw from /odom
+  value:        the robot's current x, y, yaw from /odometry/filtered
+
+PARAMETERS:
+  input_topic   (str) default: '/odometry/filtered'  — set to '/odom' to bypass EKF
 
 SUBSCRIPTIONS:
-  /odom     nav_msgs/Odometry   — robot pose from odometry_publisher.py
+  /odometry/filtered   nav_msgs/Odometry   — EKF pose from ekf_node.py
 
 PUBLICATIONS (via TF2, not a regular publisher):
-  /tf       tf2_msgs/TFMessage  — dynamic transform odom -> base_footprint
+  /tf   tf2_msgs/TFMessage   — dynamic transform odom -> base_footprint
 """
 
 import rclpy
@@ -46,13 +56,17 @@ class TF2Broadcaster(Node):
 
         # ----------------------------------------------------------------
         # PARAMETERS
-        # These must match the frame IDs used by odometry_publisher.py.
+        # These must match the frame IDs used by the upstream publisher.
+        # input_topic defaults to /odometry/filtered (Step 6: EKF output).
+        # Set to /odom to bypass the EKF and use raw wheel odometry directly.
         # ----------------------------------------------------------------
         self.declare_parameter('odom_frame_id', 'odom')
         self.declare_parameter('base_frame_id', 'base_footprint')
+        self.declare_parameter('input_topic',   '/odometry/filtered')
 
         self.odom_frame_id = self.get_parameter('odom_frame_id').value
         self.base_frame_id = self.get_parameter('base_frame_id').value
+        input_topic        = self.get_parameter('input_topic').value
 
         # ----------------------------------------------------------------
         # TRANSFORM BROADCASTER
@@ -66,8 +80,10 @@ class TF2Broadcaster(Node):
         self.broadcaster = tf2_ros.TransformBroadcaster(self)
 
         # ----------------------------------------------------------------
-        # SUBSCRIBER — /odom
-        # BEST_EFFORT QoS must match the publisher in odometry_publisher.py.
+        # SUBSCRIBER — /odometry/filtered (or /odom if input_topic overridden)
+        # ekf_node.py publishes /odometry/filtered with RELIABLE QoS.
+        # If falling back to /odom, BEST_EFFORT is needed to match odometry_publisher.
+        # We use BEST_EFFORT here to be compatible with both sources.
         # ----------------------------------------------------------------
         odom_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -77,14 +93,14 @@ class TF2Broadcaster(Node):
 
         self.odom_sub = self.create_subscription(
             Odometry,
-            '/odom',
+            input_topic,
             self.odom_callback,
             odom_qos
         )
 
         self.get_logger().info(
             f'TF2Broadcaster started.\n'
-            f'  subscribing to: /odom\n'
+            f'  subscribing to: {input_topic}\n'
             f'  broadcasting:   {self.odom_frame_id} -> {self.base_frame_id} on /tf'
         )
 

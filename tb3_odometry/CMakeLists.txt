@@ -22,7 +22,7 @@ install(PROGRAMS
   tb3_odometry/odometry_publisher.py   # Step 3 — wheel encoder → /odom
   tb3_odometry/tf2_broadcaster.py      # Step 4 — /odom → TF odom→base_footprint
   tb3_odometry/imu_republisher.py      # Step 5 — raw /imu → clean /imu/data
-  # tb3_odometry/ekf_node.py            # added in Step 6
+  tb3_odometry/ekf_node.py             # Step 6 — EKF: /odom + /imu/data → /odometry/filtered
   # tb3_odometry/velocity_controller.py # added in Step 7
   DESTINATION lib/${PROJECT_NAME}
 )

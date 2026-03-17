@@ -13,6 +13,7 @@
   - [Step 3 — Odometry Publisher](#step-3--odometry-publisher)
   - [Step 4 — TF2 Broadcaster](#step-4--tf2-broadcaster)
   - [Step 5 — IMU Republisher](#step-5--imu-republisher)
+  - [Step 6 — EKF Node](#step-6--ekf-node-extended-kalman-filter)
 
 ---
 
@@ -675,5 +676,112 @@ OpenCR hardware
 - Does **not** fuse sensors (that is the EKF's job)
 
 A production IMU pipeline would include calibration correction. For Stage 1, the MPU-9250's built-in DMP calibration is sufficient. Calibration refinement would be a future improvement.
+
+---
+
+## Step 6 — EKF Node (Extended Kalman Filter)
+
+**Goal:** Fuse wheel odometry (`/odom`) and IMU heading (`/imu/data`) into a single, better pose estimate on `/odometry/filtered`. Update `tf2_broadcaster` to use the filtered output for TF2.
+
+### Simple analogy
+
+Imagine you are navigating in fog, and you have two sources of information:
+
+1. **A pedometer** (wheel odometry) — counts your steps and direction. Accurate over short distances, but any error in your heading compounds: if you are off by 2°, after 50 steps you are visibly in the wrong place.
+2. **A compass** (IMU heading) — gives your absolute facing direction. Not affected by step-counting errors, but has its own small noise.
+
+A Kalman filter is a **trust allocator**: it continuously asks "how confident am I in each source?" and blends them in proportion to that confidence. If the pedometer is drifting badly (high uncertainty), it leans on the compass. If the compass just gave a noisy reading, it leans on the pedometer.
+
+The "Extended" part just means the motion model is non-linear (cos/sin of heading), so we need to linearise it at each step using calculus (the Jacobian). Everything else is the same as a regular Kalman filter.
+
+### Concrete example
+
+Robot drives 3 m in a straight line:
+
+| Source alone | Heading drift | End position error |
+|---|---|---|
+| Wheel odometry | ~3° (typical wheel slip) | ~16 cm sideways |
+| EKF (odom + IMU) | ~0.5° | ~3 cm sideways |
+
+The IMU correction happens ~50 times per second, pulling the heading estimate back toward the true value every time. Error stays bounded instead of growing without limit.
+
+### What is a Kalman filter, really?
+
+Think of it as a physicist who maintains a "best estimate" and "how confident am I?" about where the robot is. Every step has two phases:
+
+**PREDICT** — "Based on the wheel velocities, where should the robot be now?"
+```
+x_new = x + v * cos(θ) * dt      ← x moves forward along heading
+y_new = y + v * sin(θ) * dt      ← y moves sideways along heading
+θ_new = θ + ω * dt               ← heading rotates
+```
+Confidence shrinks (covariance P grows) because time passed and wheels slip.
+
+**CORRECT** — "The IMU says θ = 0.52 rad. My prediction says θ = 0.48 rad. How much should I adjust?"
+
+The Kalman gain K answers this:
+```
+K = P * H^T * (H * P * H^T + R)^{-1}
+```
+- `P` = how uncertain am I? (larger → trust the measurement more)
+- `R` = how noisy is the measurement? (larger → trust it less)
+
+Then update:
+```
+state = state + K * (measurement − prediction)   ← pull toward measurement
+P     = (I − K * H) * P                          ← confidence grows
+```
+
+### The 3-DOF state vector
+
+We track three numbers: `[x, y, θ]` (position + heading). We do NOT track velocities in the state — they come directly from the odometry message as "control inputs" `(v, ω)`.
+
+Why 3-DOF and not 6? The robot moves on a flat floor. There is no z, roll, or pitch. Keeping the state small keeps the math fast and the code readable.
+
+### Why "Extended" Kalman Filter?
+
+A standard Kalman filter only works if the motion model is linear (i.e., a matrix multiplication). Our model involves `cos(θ)` and `sin(θ)` — non-linear.
+
+The EKF solution: at each prediction step, compute the Jacobian (partial derivatives) of the motion model with respect to the state. This gives the best linear approximation at the current operating point:
+
+```
+F = [[1, 0, -v * sin(θ) * dt],
+     [0, 1,  v * cos(θ) * dt],
+     [0, 0,  1              ]]
+```
+
+We re-compute F every step because θ changes. This is the "extended" part.
+
+### Data flow
+
+```
+/odom  (nav_msgs/Odometry, wheel encoder pose + velocities)
+  └── ekf_node.py
+        ├── PREDICT: apply motion model (v, ω) → state, P grows
+        │
+/imu/data  (sensor_msgs/Imu, IMU heading from DMP)
+  └── ekf_node.py (stored, used in next correction)
+        └── CORRECT: Kalman gain → pull heading toward IMU
+              └── /odometry/filtered  (nav_msgs/Odometry, fused estimate)
+                    └── tf2_broadcaster.py  (Step 6 change: uses filtered pose)
+                          └── /tf  (odom → base_footprint, better heading accuracy)
+```
+
+### What changed in tf2_broadcaster (Step 6)
+
+In Step 4, `tf2_broadcaster.py` subscribed to `/odom` (raw wheels). In Step 6 it now subscribes to `/odometry/filtered` (EKF output). This means the TF2 transform — which all downstream nodes (SLAM, Nav2, RViz) use to locate the robot — now benefits from the fused estimate.
+
+An `input_topic` parameter lets you revert to `/odom` for debugging:
+```
+ros2 run tb3_odometry tf2_broadcaster.py --ros-args -p input_topic:=/odom
+```
+
+### What this node deliberately does NOT do
+
+- Does **not** fuse GPS or position measurements (we only correct heading)
+- Does **not** handle sensor dropout gracefully (if `/imu/data` stops, it predicts-only)
+- Does **not** initialise pose from a known starting position (always starts at origin)
+
+A production EKF (e.g., `robot_localization`) handles all of these. Our implementation keeps the math visible so you understand what is happening before adding that complexity.
 
 *More steps to be added as the project progresses.*
