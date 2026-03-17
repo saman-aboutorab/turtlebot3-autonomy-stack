@@ -12,6 +12,7 @@
   - [Step 2 — URDF Robot Description](#step-2--urdf-robot-description)
   - [Step 3 — Odometry Publisher](#step-3--odometry-publisher)
   - [Step 4 — TF2 Broadcaster](#step-4--tf2-broadcaster)
+  - [Step 5 — IMU Republisher](#step-5--imu-republisher)
 
 ---
 
@@ -479,5 +480,114 @@ OpenCR firmware
                                 └── /tf  (odom → base_footprint)
                                       └── cached in TF buffer of every node
 ```
+
+---
+
+## Step 5 — IMU Republisher
+
+**Goal:** Take the raw `sensor_msgs/Imu` from the OpenCR board, fix its metadata (frame_id and covariance matrices), and republish on `/imu/data` so the EKF can consume it correctly.
+
+### What the MPU-9250 measures
+
+The MPU-9250 inside the OpenCR board has three sensors in one chip:
+
+| Sensor | Measures | Field in Imu message |
+|---|---|---|
+| Gyroscope | Rotational velocity around each axis (rad/s) | `angular_velocity.x/y/z` |
+| Accelerometer | Linear acceleration including gravity (m/s²) | `linear_acceleration.x/y/z` |
+| DMP filter | Fused orientation estimate | `orientation` (quaternion) |
+
+The OpenCR firmware already processes the raw chip readings and publishes a complete `sensor_msgs/Imu` on `/imu`. We don't need to talk to the chip directly.
+
+### The two metadata problems
+
+**Problem 1 — `frame_id` is empty.**
+The EKF uses `frame_id` to look up the TF transform between the IMU and the robot body. It calls `tf_buffer.lookup_transform('base_link', msg.header.frame_id, ...)`. If `frame_id` is empty, the TF lookup fails and the EKF silently ignores the IMU entirely. It must be `'imu_link'` — matching the URDF joint from Step 2.
+
+**Problem 2 — covariance matrices are all zeros.**
+The `sensor_msgs/Imu` message has three 3×3 covariance matrices (one per sensor). The EKF uses these to weight how much to trust each measurement — higher variance = less trust. All-zero covariances mean "perfect certainty," which causes the EKF's math to become numerically unstable. The EKF may also interpret `covariance[0] = 0` as the special value `-1` (which means "ignore this sensor entirely" — a ROS convention).
+
+### The `sensor_msgs/Imu` message structure
+
+```
+sensor_msgs/Imu
+  header
+    stamp:     when the measurement was taken
+    frame_id:  which coordinate frame the data is in → must be 'imu_link'
+
+  orientation:             quaternion (from DMP fusion)
+  orientation_covariance:  [9 floats] 3x3 matrix, uncertainty in orientation
+
+  angular_velocity:             gyro reading (rad/s)
+  angular_velocity_covariance:  [9 floats] 3x3 matrix
+
+  linear_acceleration:             accelerometer reading (m/s²)
+  linear_acceleration_covariance:  [9 floats] 3x3 matrix
+```
+
+All three covariance matrices are 3×3, flattened row-major to 9 values: `[xx, xy, xz, yx, yy, yz, zx, zy, zz]`.
+
+**Special sentinel value:** if `covariance[0] = -1`, the EKF ignores that entire sensor component. This is by ROS convention. Our republisher must never produce this value.
+
+### Diagonal covariance matrices
+
+```python
+[variance, 0,        0,
+ 0,        variance, 0,
+ 0,        0,        variance]
+```
+
+Setting only the diagonal means we assume the three axes are **independent** — uncertainty in the x-axis gyro reading doesn't tell us anything about the y-axis. This is a valid assumption for most IMUs in normal operation. Off-diagonal (correlation) terms would require careful calibration to measure correctly; zero is the safe default.
+
+**MPU-9250 values used:**
+- Orientation: `0.0001 rad²` — the DMP filter is fairly accurate
+- Angular velocity: `0.0001 rad²/s²` — from gyro noise spec
+- Linear acceleration: `0.001 m²/s⁴` — accel is noisier than gyro
+
+These are starting values. The correct procedure is to record the IMU stationary for 30 seconds, compute the variance of each axis, and use those measured values. We'll do this during robot calibration.
+
+### Why sensor data passes through unchanged
+
+```python
+clean.orientation           = raw.orientation
+clean.angular_velocity      = raw.angular_velocity
+clean.linear_acceleration   = raw.linear_acceleration
+```
+
+The OpenCR already applies the MPU-9250's internal coordinate frame alignment. The measurements are already expressed in the IMU chip's frame — which in the Burger is aligned with `base_link` (`rpy="0 0 0"` in the URDF). Modifying the readings here would introduce errors. We only fix the metadata; we never touch the numbers.
+
+### Why covariances are pre-built at startup
+
+```python
+# In __init__:
+self.orientation_cov = self._diagonal_covariance(orient_var)
+
+# In callback:
+clean.orientation_covariance = list(self.orientation_cov)
+```
+
+The callback fires at ~50Hz on the RPi4. Allocating a new 9-element list on every callback, 50 times per second, creates continuous memory allocation pressure. Building the list once at startup and copying it in the callback is more efficient. The `list()` call makes a shallow copy so each message gets its own list object (no aliasing between messages).
+
+### Data flow
+
+```
+OpenCR hardware
+  └── /imu  (raw, frame_id='', covariances=[0,0,...])
+        └── imu_republisher.py
+              ├── copy timestamp unchanged
+              ├── override frame_id = 'imu_link'
+              ├── copy sensor readings unchanged
+              ├── replace covariances with MPU-9250 values
+              └── /imu/data  (clean, ready for EKF)
+                    └── ekf_node.py (Step 6)
+```
+
+### What this node deliberately does NOT do
+
+- Does **not** filter noise (low-pass filtering, outlier rejection)
+- Does **not** apply calibration offsets (gyro bias, accel bias)
+- Does **not** fuse sensors (that is the EKF's job)
+
+A production IMU pipeline would include calibration correction. For Stage 1, the MPU-9250's built-in DMP calibration is sufficient. Calibration refinement would be a future improvement.
 
 *More steps to be added as the project progresses.*
