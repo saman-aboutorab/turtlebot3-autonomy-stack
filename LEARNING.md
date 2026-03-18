@@ -999,4 +999,209 @@ OpenCR
 
 A production EKF (e.g., `robot_localization`) handles all of these. Our implementation keeps the maths visible so you understand what is happening before using a black-box solution.
 
+---
+
+## Step 7 — Velocity Controller
+
+**Goal:** Sit between the motion planner and the robot's wheels. Apply three safety layers — velocity clamping, acceleration limiting, and safety timeout — before forwarding commands to the OpenCR.
+
+---
+
+### High-level overview
+
+Nav2, teleop, and waypoint followers all send velocity commands on `/cmd_vel` without knowing the physical limits of the specific robot. A Burger's wheels physically cap out at 0.22 m/s and 2.84 rad/s. If Nav2 sends 2.0 m/s, the OpenCR clamps it internally — but in a discontinuous way that causes wheel slip and corrupts odometry.
+
+More importantly: if the planner crashes or freezes, the last command keeps driving the robot into a wall.
+
+The velocity controller solves all three problems in one place:
+
+| Problem | Solution |
+|---|---|
+| Speed exceeds physical limit | Clamp to `[−max_vel, +max_vel]` on input |
+| Step change in velocity → wheel slip | Ramp: advance at most `max_acc × dt` per control step |
+| Planner crash → robot keeps moving | Timeout: if no command for > 0.5 s, ramp to zero |
+
+---
+
+### Simple analogy
+
+Think of a new driver and a driving instructor in a car with dual controls.
+
+- The **new driver** (Nav2/teleop) sends commands: "go 80 km/h, turn hard right"
+- The **instructor** (velocity controller) intercepts:
+  - "This road is 30 km/h — clamped." (velocity limit)
+  - "You can't jump to 80 km/h instantly — ease in." (acceleration ramp)
+  - "You fell asleep? Brake." (safety timeout)
+
+The OpenCR (engine) only ever sees the instructor's smoothed, safe commands — never the raw student inputs.
+
+---
+
+### Concrete example with numbers
+
+Robot needs to go from stopped to full speed (0.22 m/s) then stop.
+
+**Without ramp (step change):**
+- Step 1: publish 0.22 m/s → wheels try to spin up instantly → slip
+- Odometry reads jump → EKF diverges → SLAM map tears
+
+**With ramp (max_acc = 0.5 m/s², dt = 0.05 s → max_step = 0.025 m/s per tick):**
+```
+tick 1: 0.000 → 0.025
+tick 2: 0.025 → 0.050
+...
+tick 9: 0.200 → 0.220   ← full speed reached in 0.44 s
+```
+Wheels spin up smoothly. No slip. Odometry stays accurate.
+
+**Timeout in action:**
+- Nav2 publishes 0.15 m/s at t=0
+- Nav2 crashes at t=0.3 s
+- Timeout fires at t=0.8 s (0.5 s after last command)
+- Velocity ramps to 0 — robot stops safely
+
+---
+
+### Design pattern — timer-driven output
+
+This is a key architectural choice worth understanding:
+
+```
+/cmd_vel_raw  →  _cmd_callback()    ← only STORES the target, never publishes
+                      │
+                  _target_lv
+                  _target_av
+
+20 Hz timer  →  _control_loop()    ← READS target, applies ramp, PUBLISHES
+                      │
+                  _current_lv
+                  _current_av
+                      │
+                   /cmd_vel
+```
+
+The subscriber and publisher are **decoupled**. Nav2 might publish commands at 10 Hz, teleop at 30 Hz — none of that matters. The output always fires at exactly `control_rate` Hz (default 20 Hz). This also means the timeout check fires reliably even when the input topic goes silent.
+
+Compare this to imu_republisher (Step 5), which published directly inside the callback. That works for pass-through republishing. Here we need a fixed-rate loop, so a timer is the right tool.
+
+---
+
+### Detailed code walkthrough
+
+#### Two separate velocity variables
+
+```python
+self._target_lv  = 0.0   # what /cmd_vel_raw last requested (clamped)
+self._target_av  = 0.0
+self._current_lv = 0.0   # what we are actually publishing right now (ramped)
+self._current_av = 0.0
+```
+
+Having two variables is the key to the ramp. `_target` can jump instantly (that's fine — it's just a stored value). `_current` moves toward `_target` slowly, at most `max_acc × dt` per step. The robot only ever sees `_current`.
+
+---
+
+#### _cmd_callback — clamp and store only
+
+```python
+def _cmd_callback(self, msg: Twist) -> None:
+    self._target_lv     = self._clamp(msg.linear.x,  -self._max_lv, self._max_lv)
+    self._target_av     = self._clamp(msg.angular.z, -self._max_av, self._max_av)
+    self._last_cmd_time = self.get_clock().now()
+```
+
+Two things happen here:
+1. Hard clamp to the Burger's physical limits. If Nav2 sends 2.0 m/s, it becomes 0.22 m/s immediately.
+2. Record the timestamp — the timeout check compares this against `now()` in every control loop tick.
+
+Nothing is published here. The subscriber's only job is to update state.
+
+---
+
+#### _control_loop — timeout, ramp, publish
+
+```python
+def _control_loop(self) -> None:
+    # 1. Timeout: how long since the last command?
+    elapsed = (self.get_clock().now() - self._last_cmd_time).nanoseconds * 1e-9
+    if elapsed > self._timeout:
+        self._target_lv = 0.0
+        self._target_av = 0.0
+
+    # 2. Ramp current toward target
+    self._current_lv = self._ramp(self._current_lv, self._target_lv, self._max_la, self._dt)
+    self._current_av = self._ramp(self._current_av, self._target_av, self._max_aa, self._dt)
+
+    # 3. Publish
+    msg = Twist()
+    msg.linear.x  = self._current_lv
+    msg.angular.z = self._current_av
+    self._pub.publish(msg)
+```
+
+Notice the order matters: timeout check zeroes `_target` first, then ramp moves `_current` toward the (now-zeroed) target. The robot slows down gradually, not instantly — the deceleration ramp applies to the stop too.
+
+---
+
+#### _clamp — hard velocity limit
+
+```python
+@staticmethod
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+```
+
+`max(lo, min(hi, value))` is the Python idiom for clamping. The inner `min(hi, value)` prevents exceeding the upper limit; the outer `max(lo, ...)` prevents going below the lower limit. Works for both positive and negative velocities because `lo` is set to `−max_vel`.
+
+---
+
+#### _ramp — acceleration limit
+
+```python
+@staticmethod
+def _ramp(current: float, target: float, max_acc: float, dt: float) -> float:
+    max_step = max_acc * dt             # largest allowed change this tick
+    delta    = target - current         # how far we need to go
+    step     = max(-max_step, min(max_step, delta))  # clamp delta to ±max_step
+    return current + step
+```
+
+This is also a clamp, but on the *change* rather than the *value*. `max_acc × dt` converts acceleration (m/s²) to the maximum velocity increment per tick (m/s). If the required delta is smaller, go all the way. If larger, take only the allowed step.
+
+Note: `_ramp` is symmetric — it limits both acceleration (ramping up) and deceleration (ramping down). This means `max_linear_acc` controls both how quickly the robot speeds up *and* how quickly it slows down.
+
+---
+
+### Data flow
+
+```
+Nav2 / teleop
+     │
+     │  /cmd_vel_raw  (geometry_msgs/Twist — raw, unlimited)
+     ▼
+velocity_controller.py
+     │
+     ├─ _cmd_callback:   clamp to Burger limits → _target_lv, _target_av
+     │
+     └─ _control_loop (20 Hz timer):
+           1. timeout check → zero _target if stale
+           2. ramp _current toward _target  (±max_acc × dt per tick)
+           3. publish
+     │
+     │  /cmd_vel  (geometry_msgs/Twist — safe, smooth)
+     ▼
+OpenCR (robot hardware)
+     │
+     ├── left wheel motor
+     └── right wheel motor
+```
+
+---
+
+### What this node deliberately does NOT do
+
+- Does **not** implement PID control. It does not compare the actual velocity (from `/odom`) against the target. A real PID would close the loop and compensate for disturbances (e.g., pushing the robot). That complexity is left for a future step.
+- Does **not** forward `/cmd_vel` fields other than `linear.x` and `angular.z`. The Burger is a differential-drive robot — the other four fields (y, z velocity; roll, pitch rate) are always zero.
+- Does **not** check for obstacle proximity before forwarding commands. That is Nav2's job via the costmap.
+
 *More steps to be added as the project progresses.*
