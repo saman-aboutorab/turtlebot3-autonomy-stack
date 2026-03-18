@@ -1204,4 +1204,188 @@ OpenCR (robot hardware)
 - Does **not** forward `/cmd_vel` fields other than `linear.x` and `angular.z`. The Burger is a differential-drive robot — the other four fields (y, z velocity; roll, pitch rate) are always zero.
 - Does **not** check for obstacle proximity before forwarding commands. That is Nav2's job via the costmap.
 
+---
+
+## Step 8 — Bringup Launch Files
+
+**Goal:** Replace 6+ individual terminal commands with three composable launch files: `sensors.launch.py`, `robot.launch.py`, and `slam.launch.py`. Add `burger.yaml` to configure slam_toolbox for the Burger's hardware.
+
+---
+
+### High-level overview
+
+Up to this point you ran each node by hand in a separate terminal. That works for debugging one node at a time, but it's brittle: if you open the terminals in the wrong order, forget one node, or mistype a parameter, things break silently.
+
+Launch files solve this. A ROS2 launch file is a Python script that describes which nodes to start, with which parameters, in which order — and lets you compose (include) other launch files so you never repeat yourself.
+
+The result of Step 8 is three commands that cover every use case:
+
+```bash
+# Test the full stack on the laptop (no hardware needed)
+ros2 launch tb3_bringup robot.launch.py
+
+# Build a map on the real robot
+ros2 launch tb3_bringup slam.launch.py fake_joints:=false
+
+# Run just the sensor processing layer
+ros2 launch tb3_bringup sensors.launch.py
+```
+
+---
+
+### Simple analogy
+
+Think of each launch file as a **recipe card** that references other recipe cards.
+
+- `sensors.launch.py` is "make the sauce" (2 ingredients)
+- `robot.launch.py` is "make the pasta dish" — it says *include the sauce recipe*, then adds noodles, cheese, and plating (EKF + TF + velocity controller)
+- `slam.launch.py` is "make the full dinner" — it says *include the pasta recipe*, then adds dessert (slam_toolbox)
+
+If you want to change how the sauce is made, you edit `sensors.launch.py` once and every recipe that includes it picks up the change automatically.
+
+---
+
+### Concrete example — what happens when you run `robot.launch.py`
+
+```
+ros2 launch tb3_bringup robot.launch.py
+```
+
+ROS2 processes this in order:
+
+1. Reads `robot.launch.py` → sees `IncludeLaunchDescription(description.launch.py)`
+2. Expands `description.launch.py`:
+   - Runs `xacro turtlebot3_burger_sensors.urdf.xacro` → gets URDF XML string
+   - Starts `robot_state_publisher` with that XML
+   - Starts `joint_state_publisher` (because `use_joint_state_publisher=true`)
+3. Expands `sensors.launch.py`:
+   - Starts `odometry_publisher`
+   - Starts `imu_republisher`
+4. Starts `ekf_node`, `tf2_broadcaster`, `velocity_controller` directly
+5. All 7 nodes are up. Total time: ~2 seconds.
+
+Without launch files, step 2 alone requires finding the URDF path, running xacro, and passing the XML as a CLI argument by hand.
+
+---
+
+### The composition pattern — IncludeLaunchDescription
+
+```python
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+
+IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(
+        os.path.join(pkg, 'launch', 'sensors.launch.py')
+    ),
+)
+```
+
+`IncludeLaunchDescription` is a launch *action* — it tells the ROS2 launch system to open the other file, parse it, and merge its nodes into the current launch description. It is **not** a Python `import` — the included file is parsed at launch time, not at import time. This means the included file can use `LaunchConfiguration` values that are only known at runtime.
+
+---
+
+### Forwarding arguments between launch files
+
+```python
+# In robot.launch.py — pass fake_joints down to description.launch.py
+IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(...),
+    launch_arguments={
+        'use_joint_state_publisher': LaunchConfiguration('fake_joints'),
+    }.items(),
+)
+```
+
+`launch_arguments={...}.items()` is the ROS2 way to pass arguments to an included launch file. It works like keyword arguments in Python, but they are resolved lazily at launch time — `LaunchConfiguration('fake_joints')` is a *substitution* object that reads the value from the command line when the launch system actually starts the nodes.
+
+This is why argument forwarding needs `.items()` (to convert a dict to key-value pairs) and why you cannot just pass a Python string directly.
+
+---
+
+### IfCondition — conditional node start
+
+In `description.launch.py`, we added:
+
+```python
+from launch.conditions import IfCondition
+
+Node(
+    package='joint_state_publisher',
+    executable='joint_state_publisher',
+    condition=IfCondition(LaunchConfiguration('use_joint_state_publisher')),
+)
+```
+
+`IfCondition` evaluates a launch substitution as a boolean. If the argument is `'true'`, the node starts. If `'false'`, the entire `Node(...)` action is skipped — the node never appears in `ros2 node list`. This is the standard ROS2 pattern for optional nodes (sim vs. real, debug vs. release).
+
+---
+
+### burger.yaml — the ROS2 parameter YAML convention
+
+```yaml
+slam_toolbox:           # ← must match the node name= in the launch file
+  ros__parameters:      # ← this exact key is required by ROS2
+    resolution: 0.05
+    max_laser_range: 3.5
+    ...
+```
+
+ROS2 loads parameters from YAML files by matching the top-level key against the node name. The `ros__parameters` sub-key is mandatory — it tells the parameter loader where the actual parameters begin. If either key is wrong, the parameters are silently ignored and the node uses its defaults.
+
+The node in `slam.launch.py` is declared as `name='slam_toolbox'`, so the YAML top-level key must also be `slam_toolbox`.
+
+---
+
+### Key slam_toolbox parameters explained
+
+| Parameter | Value | Why |
+|---|---|---|
+| `resolution` | 0.05 m | 5 cm per grid cell — fine enough for indoor navigation |
+| `max_laser_range` | 3.5 m | LDS-01 hardware maximum — ignores far noisy readings |
+| `minimum_travel_distance` | 0.3 m | Only process a new scan after moving 30 cm — avoids wasting CPU while still |
+| `minimum_travel_heading` | 0.3 rad | Same for rotation (~17°) |
+| `do_loop_closing` | true | Corrects drift when the robot revisits a location |
+| `mode` | mapping | Build a new map; switch to `localization` in Step 10 |
+| `transform_publish_period` | 0.02 s | Publish map→odom TF at 50 Hz |
+
+---
+
+### Data flow
+
+```
+burger.yaml (config)
+     │
+     ▼
+slam.launch.py
+  ├── robot.launch.py
+  │     ├── description.launch.py
+  │     │     ├── robot_state_publisher  (/robot_description, /tf_static)
+  │     │     └── joint_state_publisher  (/joint_states)  ← laptop only
+  │     ├── sensors.launch.py
+  │     │     ├── odometry_publisher     (/odom)
+  │     │     └── imu_republisher        (/imu/data)
+  │     ├── ekf_node                     (/odometry/filtered)
+  │     ├── tf2_broadcaster              (/tf: odom→base_footprint)
+  │     └── velocity_controller          (/cmd_vel)
+  │
+  └── slam_toolbox
+        subscriptions: /scan, /tf
+        publishes:     /map, /tf (map→odom)
+```
+
+---
+
+### What changed in description.launch.py (Step 8)
+
+Added a `use_joint_state_publisher` argument (default `true`) and wrapped `joint_state_publisher` in `IfCondition`. When `robot.launch.py` passes `fake_joints:=false`, this node is skipped so it does not conflict with the OpenCR's real `/joint_states` stream.
+
+---
+
+### What these files deliberately do NOT do
+
+- Do **not** start the OpenCR driver node. On the real robot the OpenCR firmware runs independently and just publishes to `/joint_states` and `/imu`. Starting it from our launch files would require the `turtlebot3_node` package (separate RPi4 setup).
+- Do **not** start RViz. You can add it locally with `rviz2` if needed without baking it into the bringup files.
+- Do **not** include a namespace. All topics are in the global namespace `/` — fine for a single robot.
+
 *More steps to be added as the project progresses.*

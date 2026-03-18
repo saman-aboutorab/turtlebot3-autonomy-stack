@@ -32,6 +32,12 @@ WHY get_package_share_directory() NOT __file__:
 USAGE:
   ros2 launch tb3_bringup description.launch.py
   ros2 launch tb3_bringup description.launch.py urdf_file:=/path/to/custom.urdf.xacro
+  ros2 launch tb3_bringup description.launch.py use_joint_state_publisher:=false
+
+ARGUMENTS:
+  use_joint_state_publisher (bool, default: true)
+    true  — start joint_state_publisher (laptop / no hardware)
+    false — skip it; the OpenCR provides /joint_states on the real robot
 
 VERIFY:
   ros2 run tf2_tools view_frames          # generates a PDF of the TF tree
@@ -44,6 +50,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, Command
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -63,13 +70,20 @@ def generate_launch_description():
         pkg_share, 'hardware', 'urdf', 'turtlebot3_burger_sensors.urdf.xacro'
     )
 
-    # --- 2. Declare a launch argument so the URDF path can be overridden ---
-    # This is the ROS2 way to make launch files configurable from CLI:
-    #   ros2 launch tb3_bringup description.launch.py urdf_file:=/other/robot.urdf.xacro
+    # --- 2. Declare launch arguments ---
     urdf_file_arg = DeclareLaunchArgument(
         name='urdf_file',
         default_value=default_urdf,
         description='Absolute path to the robot URDF xacro file'
+    )
+
+    # Controls whether joint_state_publisher starts.
+    # On the real robot the OpenCR provides /joint_states, so we don't want
+    # the fake publisher fighting it. robot.launch.py passes false here.
+    use_jsp_arg = DeclareLaunchArgument(
+        name='use_joint_state_publisher',
+        default_value='true',
+        description='true = laptop (fake joints); false = real robot (OpenCR provides /joint_states)'
     )
 
     # --- 3. robot_state_publisher node ---
@@ -95,19 +109,21 @@ def generate_launch_description():
     )
 
     # --- 4. joint_state_publisher ---
-    # For a real robot, /joint_states comes from the OpenCR hardware driver.
-    # On the laptop (no hardware), we use joint_state_publisher to fake it
-    # so robot_state_publisher can still update the wheel joint positions.
-    # When we run on the real robot, this node is replaced by the OpenCR driver.
+    # On the laptop: publishes /joint_states at position 0 so RViz can show
+    # the robot. On the real robot, OpenCR provides /joint_states — starting
+    # this node there would publish conflicting messages on the same topic.
+    # IfCondition reads the use_joint_state_publisher argument at launch time.
     joint_state_publisher = Node(
         package='joint_state_publisher',
         executable='joint_state_publisher',
         name='joint_state_publisher',
         output='screen',
+        condition=IfCondition(LaunchConfiguration('use_joint_state_publisher')),
     )
 
     return LaunchDescription([
         urdf_file_arg,
+        use_jsp_arg,
         robot_state_publisher,
         joint_state_publisher,
     ])

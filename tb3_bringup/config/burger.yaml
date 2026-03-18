@@ -1,0 +1,104 @@
+# burger.yaml
+# ===========
+# slam_toolbox configuration for the TurtleBot3 Burger.
+#
+# YAML PARAMETER CONVENTION IN ROS2:
+#   Parameters are loaded per-node. The top-level key must match the node
+#   name as declared in the launch file (name='slam_toolbox'), followed by
+#   'ros__parameters'. This is how ROS2 knows which parameters belong to
+#   which node when multiple nodes load the same YAML file.
+#
+# HOW TO TUNE:
+#   resolution         — smaller = more detail, more memory, slower
+#   max_laser_range    — must not exceed the LiDAR's physical max (LDS-01 = 3.5 m)
+#   minimum_travel_*   — how much the robot must move before processing a new scan
+#                        larger values = faster but coarser map
+#   do_loop_closing    — set false if the robot is in an open space with no revisits
+#
+# REFERENCE:
+#   https://github.com/SteveMacenski/slam_toolbox
+
+slam_toolbox:
+  ros__parameters:
+
+    # ── frames ─────────────────────────────────────────────────────────────
+    # Must match the frame IDs used by our TF tree and odometry nodes.
+    odom_frame:   odom
+    map_frame:    map
+    base_frame:   base_footprint
+
+    # LiDAR topic. OpenCR firmware publishes on /scan.
+    scan_topic:   /scan
+
+    # ── mode ────────────────────────────────────────────────────────────────
+    # 'mapping'    — build a new map from scratch (use this for Step 9)
+    # 'localization' — load an existing map, localise only (use for Step 10)
+    mode: mapping
+
+    # ── map parameters ───────────────────────────────────────────────────────
+    # Grid cell size in metres. 0.05 m = 5 cm per cell.
+    # Burger's wheels are 66 mm diameter → 5 cm resolution is a good match.
+    resolution: 0.05
+
+    # Maximum usable LiDAR range. LDS-01 hardware max is 3.5 m.
+    # Setting this correctly avoids accepting noisy far-range readings.
+    max_laser_range: 3.5
+
+    # ── update triggers ──────────────────────────────────────────────────────
+    # slam_toolbox only processes a new scan if the robot has moved enough.
+    # This prevents wasting CPU on identical scans while the robot is still.
+    minimum_travel_distance: 0.3   # metres
+    minimum_travel_heading:  0.3   # radians (~17°)
+    minimum_time_interval:   0.3   # seconds — minimum wall time between scans
+
+    # ── TF and timing ────────────────────────────────────────────────────────
+    # How long to wait (seconds) for a TF transform before giving up.
+    transform_timeout: 0.2
+
+    # TF buffer stores the past N seconds of transforms for time interpolation.
+    # 30 seconds is plenty for a slow indoor robot.
+    tf_buffer_duration: 30.0
+
+    # How often (seconds) to publish the map→odom transform.
+    # 0.02 s = 50 Hz — matches our robot_state_publisher publish_frequency.
+    transform_publish_period: 0.02
+
+    # How often (seconds) to re-publish the full occupancy grid map.
+    # 5 seconds is fine; the map doesn't change every tick.
+    map_update_interval: 5.0
+
+    # ── loop closure ─────────────────────────────────────────────────────────
+    # Loop closure: when the robot revisits a place it has been before, slam_toolbox
+    # recognises the scan match and corrects accumulated drift in the whole map.
+    do_loop_closing: true
+
+    # Minimum chain length (consecutive scans) to consider for a loop candidate.
+    loop_match_minimum_chain_size: 10
+
+    # Search radius (metres) around the current pose to look for loop candidates.
+    loop_search_maximum_distance: 3.0
+
+    # Minimum scan-match score to accept a loop closure (0.0–1.0).
+    # Too low → false closures; too high → misses real revisits.
+    loop_match_minimum_response_fine: 0.45
+
+    # ── scan matcher ─────────────────────────────────────────────────────────
+    use_scan_matching:    true
+    use_scan_barycenter:  true
+
+    # Coarse search window for scan matching (metres and radians).
+    correlation_search_space_dimension:  0.5
+    correlation_search_space_resolution: 0.01
+
+    # Penalties for disagreement in distance and angle during scan matching.
+    distance_variance_penalty: 0.5
+    angle_variance_penalty:    1.0
+
+    # ── performance ──────────────────────────────────────────────────────────
+    # Stack size for the SLAM solver thread. 40 MB is recommended for Ceres.
+    stack_size_to_use: 40000000
+
+    # Enables the interactive RViz panel (draw constraints, pause, etc.)
+    enable_interactive_mode: true
+
+    debug_logging: false
