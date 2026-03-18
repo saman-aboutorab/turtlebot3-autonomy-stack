@@ -1388,4 +1388,164 @@ Added a `use_joint_state_publisher` argument (default `true`) and wrapped `joint
 - Do **not** start RViz. You can add it locally with `rviz2` if needed without baking it into the bringup files.
 - Do **not** include a namespace. All topics are in the global namespace `/` — fine for a single robot.
 
+---
+
+## Step 9 — SLAM Map Building
+
+**Goal:** Drive the robot manually through a real space while slam_toolbox builds a 2D occupancy grid. Save the finished map as `.pgm` + `.yaml` for use in autonomous navigation (Step 10).
+
+**This step requires the real robot.** The laptop portion (teleop launch file, maps directory, verification test) is done first.
+
+---
+
+### High-level overview
+
+SLAM stands for **Simultaneous Localisation and Mapping**. The robot needs to do two things at once that depend on each other:
+
+- To build a map, it needs to know where it is
+- To know where it is, it needs a map
+
+slam_toolbox solves this by maintaining a *probability distribution* over both the map and the robot's pose at the same time, and updating both as new LiDAR scans arrive.
+
+Our role in Step 9 is purely the plumbing:
+- `slam.launch.py` starts everything (robot stack + slam_toolbox)
+- `teleop.launch.py` gives keyboard control through the velocity controller
+- We drive the robot around — slam_toolbox does the maths
+- `map_saver_cli` writes the finished map to disk
+
+---
+
+### Simple analogy
+
+Imagine you are blindfolded in a dark room, holding a flashlight that only illuminates 3.5 metres (the LiDAR range). You spin slowly, sketch what you see, take a step, sketch again. Each sketch overlaps with the previous one — slam_toolbox aligns the overlaps to figure out where you moved and extend the map.
+
+When you return to a doorway you sketched earlier and recognise it from the scan pattern, you know exactly where you are — this is **loop closure**. It corrects any drift that accumulated while you were walking.
+
+---
+
+### Why teleop goes through the velocity controller
+
+```
+teleop_twist_keyboard
+        │
+        │  /cmd_vel_raw   ← remapped from default /cmd_vel
+        ▼
+velocity_controller
+        │  clamp → ramp → timeout
+        │  /cmd_vel
+        ▼
+     OpenCR
+```
+
+If teleop published directly to `/cmd_vel`, a fast keypress could send a velocity spike to the wheels, causing slip that corrupts the odometry the SLAM algorithm depends on. By routing through the velocity controller, every keypress is smoothed and bounded — the map stays clean.
+
+---
+
+### Detailed code walkthrough
+
+#### teleop.launch.py — the remap and emulate_tty
+
+```python
+Node(
+    package='teleop_twist_keyboard',
+    executable='teleop_twist_keyboard',
+    output='screen',
+    emulate_tty=True,                            # ← gives the node a real terminal for stdin
+    remappings=[('cmd_vel', '/cmd_vel_raw')],    # ← routes through velocity_controller
+)
+```
+
+`emulate_tty=True` is the key to making keyboard teleop work inside `ros2 launch`. Normally, when a subprocess is launched from Python, its stdin is not connected to the terminal — it gets a pipe instead. `emulate_tty=True` tells the launch system to create a pseudo-terminal (PTY) for the node, so `teleop_twist_keyboard` can read keypresses the same way it would if run directly with `ros2 run`.
+
+`remappings=[('cmd_vel', '/cmd_vel_raw')]` remaps the node's internal topic name `cmd_vel` to the fully qualified `/cmd_vel_raw`. This is a ROS2 node-level remap — it works regardless of what the node's source code calls the topic.
+
+---
+
+### Data flow during SLAM
+
+```
+OpenCR (hardware)
+  ├── /joint_states ──► odometry_publisher ──► /odom ──► ekf_node
+  ├── /imu          ──► imu_republisher    ──► /imu/data ──► ekf_node
+  └── /scan         ──────────────────────────────────────────────────────────────────┐
+                                                                                       │
+ekf_node ──► /odometry/filtered ──► tf2_broadcaster ──► /tf (odom→base_footprint)     │
+                                                                                       │
+robot_state_publisher ──► /tf_static (base_footprint→base_scan, all fixed frames)     │
+                                                                                       ▼
+                                                                              slam_toolbox
+                                                                                  │
+                                                                    reads: /scan, /tf tree
+                                                                    writes: /map (occupancy grid)
+                                                                            /tf  (map→odom)
+```
+
+slam_toolbox needs the full TF chain `map → odom → base_footprint → base_scan` to know where the LiDAR is in the world. Our nodes from Steps 2–6 provide everything except `map → odom`, which slam_toolbox itself publishes as it tracks the robot's position in the growing map.
+
+---
+
+### On-robot procedure (when hardware is available)
+
+**Terminal 1 (on RPi4 or over SSH):**
+```bash
+ros2 launch tb3_bringup slam.launch.py fake_joints:=false
+```
+
+**Terminal 2 (laptop):**
+```bash
+ros2 launch tb3_bringup teleop.launch.py
+# Keys: i=forward  ,=back  j=left  l=right  k=stop
+# q/z = speed up/down
+```
+
+**Terminal 3 (laptop) — watch the map build in RViz:**
+```bash
+rviz2
+# Add: Map → topic /map
+# Add: RobotModel
+# Add: LaserScan → topic /scan
+# Fixed Frame: map
+```
+
+**Driving strategy for a clean map:**
+1. Drive slowly (50% of max speed: `z` key twice)
+2. Cover every area twice — once forward, once return
+3. Close every loop: return to doorways and junctions you have already mapped
+4. Avoid sharp turns at full speed (wheel slip = odometry error = map tear)
+
+**Save the map when done:**
+```bash
+ros2 run nav2_map_server map_saver_cli -f ~/maps/my_map
+# Creates: my_map.pgm  (grayscale image: white=free, black=wall, grey=unknown)
+#          my_map.yaml (metadata: resolution, origin, thresholds)
+```
+
+---
+
+### What the saved map files contain
+
+`my_map.pgm` — a greyscale image where each pixel is one grid cell (0.05 m × 0.05 m):
+- White (255) = free space (LiDAR confirmed no obstacle)
+- Black (0) = occupied (LiDAR hit a wall)
+- Grey (205) = unknown (LiDAR never reached there)
+
+`my_map.yaml`:
+```yaml
+image: my_map.pgm
+resolution: 0.05        # metres per pixel — must match burger.yaml
+origin: [-x, -y, 0.0]  # map frame origin in world coordinates
+negate: 0
+occupied_thresh: 0.65   # pixels darker than this = occupied
+free_thresh: 0.196      # pixels lighter than this = free
+```
+
+Nav2 (Step 10) loads both files. The `.yaml` tells Nav2 how to interpret the pixel values and where to place the map origin in the world frame.
+
+---
+
+### What this step deliberately does NOT do
+
+- Does **not** save the SLAM graph (keyframes + constraints). `map_saver_cli` saves only the rasterised occupancy grid, not the internal slam_toolbox representation. To resume mapping later, use `serialize_map_saver` instead.
+- Does **not** tune slam_toolbox for the specific room. The `burger.yaml` parameters are good defaults; room-specific tuning (scan buffer size, loop closure thresholds) can be done later.
+
 *More steps to be added as the project progresses.*

@@ -1,0 +1,19 @@
+# ROS2 build and install artifacts
+build/
+install/
+log/
+
+# Map files saved by map_saver_cli (binary + metadata, not source code)
+# The maps/ directory itself is tracked (via maps/.gitkeep) so the folder
+# exists after cloning, but the map files you generate are local only.
+maps/*.pgm
+maps/*.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor
+.vscode/
+.idea/
