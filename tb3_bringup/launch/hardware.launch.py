@@ -67,7 +67,10 @@ def generate_launch_description():
         executable='turtlebot3_ros',
         name='turtlebot3_node',
         output='screen',
-        parameters=[tb3_params],
+        parameters=[
+            tb3_params,
+            {'namespace': ''},   # required statically-typed param (default: no namespace)
+        ],
         arguments=['-i', '/dev/ttyACM0'],
         remappings=[
             # Hide their odometry so our odometry_publisher.py owns /odom cleanly.
