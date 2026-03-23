@@ -38,11 +38,24 @@ DATA FLOW ON REAL ROBOT:
   LiDAR ───── hlds_laser     ──► /scan         ──► slam_toolbox
 """
 
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+
+    # turtlebot3_ros requires opencr.id and other hardware parameters.
+    # These are defined in the burger.yaml shipped with turtlebot3_bringup.
+    # Without this file the node crashes with UninitializedStaticallyTypedParameterException.
+    # The serial port is passed as a CLI argument (-i), not as a ROS parameter.
+    tb3_params = os.path.join(
+        get_package_share_directory('turtlebot3_bringup'),
+        'param',
+        'burger.yaml',
+    )
 
     # ── OpenCR hardware interface ─────────────────────────────────────────────
     # turtlebot3_ros talks to the OpenCR over /dev/ttyACM0.
@@ -54,10 +67,8 @@ def generate_launch_description():
         executable='turtlebot3_ros',
         name='turtlebot3_node',
         output='screen',
-        parameters=[{
-            'opencr_port': '/dev/ttyACM0',
-            'baud_rate': 1000000,
-        }],
+        parameters=[tb3_params],
+        arguments=['-i', '/dev/ttyACM0'],
         remappings=[
             # Hide their odometry so our odometry_publisher.py owns /odom cleanly.
             ('odom', 'odom_hw'),
