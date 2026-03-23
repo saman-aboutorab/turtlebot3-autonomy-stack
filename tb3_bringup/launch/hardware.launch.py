@@ -69,7 +69,27 @@ def generate_launch_description():
         output='screen',
         parameters=[
             tb3_params,
-            {'namespace': ''},   # required statically-typed param (default: no namespace)
+            {
+                # --- required static params not set in burger.yaml for this node ---
+                'namespace': '',
+
+                # burger.yaml puts odometry.* under 'diff_drive_controller', not
+                # 'turtlebot3_node', so turtlebot3_ros never receives them from the file.
+                # We set them explicitly here.
+                'odometry.frame_id':       'odom',
+                'odometry.child_frame_id': 'base_footprint',
+                'odometry.use_imu':        True,
+                # False: our tf2_broadcaster publishes odom→base_footprint from the
+                # filtered odometry. If turtlebot3_ros also published this TF we'd
+                # get two conflicting transforms on /tf.
+                'odometry.publish_tf':     False,
+
+                # burger.yaml sets enable_stamped_cmd_vel: true, which makes
+                # turtlebot3_ros expect geometry_msgs/TwistStamped on /cmd_vel.
+                # Our velocity_controller publishes plain geometry_msgs/Twist.
+                # Override to false so our commands are accepted.
+                'enable_stamped_cmd_vel':  False,
+            },
         ],
         arguments=['-i', '/dev/ttyACM0'],
         remappings=[
