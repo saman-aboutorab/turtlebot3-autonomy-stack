@@ -5,38 +5,35 @@ robot.launch.py
 Full robot bringup. One command starts every node needed to drive,
 localise, and observe the TurtleBot3 Burger.
 
-This file composes three pieces:
+LAPTOP (fake_joints:=true, default):
+  description.launch.py   — URDF + robot_state_publisher + joint_state_publisher
+  sensors.launch.py       — odometry_publisher + imu_republisher
+  ekf_node                — /odom + /imu/data → /odometry/filtered
+  tf2_broadcaster         — /odometry/filtered → TF odom→base_footprint
+  velocity_controller     — /cmd_vel_raw → /cmd_vel
 
-  1. description.launch.py  — URDF → robot_state_publisher → static TF
-                               [+ joint_state_publisher when fake_joints=true]
-  2. sensors.launch.py      — odometry_publisher + imu_republisher
-  3. Three nodes started directly here:
-       ekf_node              — fuses /odom + /imu/data → /odometry/filtered
-       tf2_broadcaster       — /odometry/filtered → TF odom→base_footprint
-       velocity_controller   — /cmd_vel_raw → clamp/ramp/timeout → /cmd_vel
+REAL ROBOT (fake_joints:=false):
+  hardware.launch.py      — turtlebot3_ros (OpenCR) + hlds_laser (LiDAR)
+  description.launch.py   — URDF + robot_state_publisher (NO joint_state_publisher)
+  sensors.launch.py       — odometry_publisher + imu_republisher
+  ekf_node, tf2_broadcaster, velocity_controller (same as above)
 
-COMPOSITION PATTERN:
-  IncludeLaunchDescription + PythonLaunchDescriptionSource is the ROS2 way
-  to nest launch files. Arguments can be forwarded to included files via
-  launch_arguments={...}.items(). This is equivalent to calling the other
-  launch file as a function with keyword arguments.
+WHY hardware.launch.py IS SEPARATE:
+  The official turtlebot3_bringup starts its own robot_state_publisher and
+  publishes /odom from turtlebot3_ros. Including it directly would create:
+    - Two robot_state_publisher nodes with different URDFs → conflicting TF
+    - Two /odom publishers → EKF receives interleaved messages from both
+  hardware.launch.py starts only the hardware drivers with /odom remapped
+  to /odom_hw so our odometry_publisher owns /odom cleanly.
 
 ARGUMENTS:
   fake_joints (str, default: 'true')
-    'true'  — run joint_state_publisher (laptop testing, no OpenCR)
-    'false' — skip it; the real robot's OpenCR provides /joint_states
+    'true'  — laptop mode: joint_state_publisher fakes /joint_states
+    'false' — robot mode: hardware.launch.py provides real sensor data
 
 USAGE:
-  # Laptop (default: fake joints for testing)
-  ros2 launch tb3_bringup robot.launch.py
-
-  # Real robot (no fake joints; OpenCR provides /joint_states and /imu)
-  ros2 launch tb3_bringup robot.launch.py fake_joints:=false
-
-VERIFY:
-  ros2 node list                          # should show all 7 nodes
-  ros2 topic list                         # /odom, /imu/data, /odometry/filtered, /tf ...
-  ros2 run tf2_tools view_frames          # full TF tree as a PDF
+  ros2 launch tb3_bringup robot.launch.py                    # laptop
+  ros2 launch tb3_bringup robot.launch.py fake_joints:=false # real robot
 """
 
 import os
@@ -44,6 +41,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -58,16 +56,26 @@ def generate_launch_description():
         name='fake_joints',
         default_value='true',
         description=(
-            'true  = start joint_state_publisher (laptop, no hardware)\n'
-            'false = rely on OpenCR for /joint_states (real robot)'
+            'true  = laptop mode (joint_state_publisher fakes /joint_states)\n'
+            'false = robot mode (hardware.launch.py provides real sensor data)'
         ),
     )
 
-    # ── included launch files ─────────────────────────────────────────────────
+    # ── hardware drivers (real robot only) ───────────────────────────────────
+    # Starts turtlebot3_ros (OpenCR) + hlds_laser (LiDAR).
+    # Skipped on the laptop — joint_state_publisher handles /joint_states there.
+    # UnlessCondition: include this when fake_joints is NOT true (i.e. real robot).
+    hardware_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg, 'launch', 'hardware.launch.py')
+        ),
+        condition=UnlessCondition(LaunchConfiguration('fake_joints')),
+    )
 
-    # URDF + robot_state_publisher + (conditionally) joint_state_publisher.
-    # We forward fake_joints as use_joint_state_publisher so description.launch.py
-    # knows whether to start the fake publisher.
+    # ── URDF + robot_state_publisher ─────────────────────────────────────────
+    # Forwards fake_joints → use_joint_state_publisher in description.launch.py.
+    # On laptop (true):  joint_state_publisher starts alongside robot_state_publisher.
+    # On robot  (false): joint_state_publisher is skipped; OpenCR provides /joint_states.
     description_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg, 'launch', 'description.launch.py')
@@ -77,15 +85,16 @@ def generate_launch_description():
         }.items(),
     )
 
-    # odometry_publisher + imu_republisher
+    # ── sensor processing nodes ───────────────────────────────────────────────
+    # odometry_publisher  — /joint_states → /odom
+    # imu_republisher     — /imu          → /imu/data
     sensors_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg, 'launch', 'sensors.launch.py')
         ),
     )
 
-    # ── nodes started directly ────────────────────────────────────────────────
-
+    # ── estimation + control nodes ────────────────────────────────────────────
     ekf_node = Node(
         package='tb3_odometry',
         executable='ekf_node.py',
@@ -109,6 +118,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         fake_joints_arg,
+        hardware_launch,
         description_launch,
         sensors_launch,
         ekf_node,
