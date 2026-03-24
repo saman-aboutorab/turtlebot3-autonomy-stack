@@ -101,7 +101,7 @@ def generate_launch_description():
     # publish_period_sec: how often to re-stitch and publish the full map
     occupancy_grid_node = Node(
         package='cartographer_ros',
-        executable='occupancy_grid_node',
+        executable='cartographer_occupancy_grid_node',
         name='occupancy_grid_node',
         output='screen',
         parameters=[{
