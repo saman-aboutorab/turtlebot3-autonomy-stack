@@ -22,19 +22,17 @@ options = {
   map_frame                            = "map",
   tracking_frame                       = "base_footprint",
 
-  -- published_frame = "odom": cartographer publishes map→odom.
-  -- Combined with our tf2_broadcaster (odom→base_footprint), this gives
-  -- the full TF chain Nav2 expects: map→odom→base_footprint→base_scan.
-  published_frame                      = "odom",
+  -- published_frame = "base_footprint": cartographer tracks the robot base.
+  -- provide_odom_frame = true: cartographer publishes both map→odom AND
+  -- odom→base_footprint (same as revo_lds.lua reference config).
+  -- This avoids cartographer having to look up odom→base_footprint from
+  -- our tf2_broadcaster at exact scan timestamps, which caused silent
+  -- scan-skipping. Cartographer owns the odom frame during SLAM mapping.
+  published_frame                      = "base_footprint",
   odom_frame                           = "odom",
-
-  -- provide_odom_frame = false: we provide odom externally via tf2_broadcaster.
-  -- cartographer only publishes map→published_frame (map→odom).
-  provide_odom_frame                   = false,
+  provide_odom_frame                   = true,
   publish_frame_projected_to_2d        = false,
   use_pose_extrapolator                = true,
-
-  -- No odometry topic subscription — cartographer reads odom via TF.
   use_odometry                         = false,
   use_nav_sat                          = false,
   use_landmarks                        = false,
