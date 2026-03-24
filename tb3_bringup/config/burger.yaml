@@ -99,6 +99,8 @@ slam_toolbox:
     stack_size_to_use: 40000000
 
     # Enables the interactive RViz panel (draw constraints, pause, etc.)
-    enable_interactive_mode: true
+    # Set false when not using the RViz slam_toolbox panel — avoids plugin
+    # loading issues that can cause silent hangs on startup.
+    enable_interactive_mode: false
 
     debug_logging: false
