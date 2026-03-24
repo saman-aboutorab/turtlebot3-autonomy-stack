@@ -412,6 +412,38 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd
 
 ---
 
+### [1-9d] slam_toolbox crashes on aarch64 (RPi4) — switched to cartographer
+
+**Date:** 2026-03-24
+**Package:** ros-jazzy-slam-toolbox 2.8.3-1noble.20260125.011542 (arm64)
+
+**Symptom:**
+`async_slam_toolbox_node` (and `sync_slam_toolbox_node`) crash silently immediately after startup. With a params file, the node prints exactly one line then exits:
+```
+[INFO] [slam_toolbox]: Node using stack size 40000000
+```
+With no params file, it prints nothing and exits. No error message is produced. `ps aux` confirms the process is gone.
+
+**Diagnosis steps taken:**
+- Confirmed not a TF chain issue (`/tf` odom→base_footprint was publishing correctly)
+- Confirmed not a timing issue (slam_toolbox started 27 seconds after full robot stack was up)
+- Confirmed not a parameter loading issue (crash happens even with no `--params-file`)
+- Confirmed not a memory issue (3.0 GiB available)
+- `enable_interactive_mode: false` had no effect
+- Both `async_slam_toolbox_node` and `sync_slam_toolbox_node` crash identically
+- Reinstalling `ros-jazzy-slam-toolbox` did not fix it
+
+**Root cause:**
+Binary-level crash in the ros-jazzy-slam-toolbox arm64 apt package on Ubuntu 24.04 (Raspberry Pi 4, aarch64). Most likely a Ceres solver initialization bug in the packaged binary for this architecture. No fix available without building slam_toolbox from source.
+
+**Resolution:**
+Switched to **cartographer** (`ros-jazzy-cartographer` + `ros-jazzy-cartographer-ros`), which is also recommended by the official TurtleBot3 Jazzy documentation and is known stable on arm64.
+
+**Lesson:**
+The ros-jazzy-slam-toolbox arm64 binary may be broken on RPi4. If slam_toolbox crashes after one line with no error output, switch to cartographer — it is a fully equivalent SLAM solution for 2D mapping and is the official TurtleBot3 recommendation.
+
+---
+
 ### [1-9c] Workspace not sourced in new terminals
 
 **Date:** 2026-03-24
