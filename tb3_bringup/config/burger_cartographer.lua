@@ -25,13 +25,23 @@ options = {
   -- Frame IDs — must match our URDF and TF tree exactly.
   map_frame                      = "map",
   tracking_frame                 = "base_footprint",
-  published_frame                = "base_footprint",
+
+  -- published_frame must be "odom", NOT "base_footprint".
+  -- With provide_odom_frame=false, cartographer publishes map→published_frame.
+  -- If published_frame="base_footprint", cartographer and tf2_broadcaster both
+  -- publish odom→base_footprint, creating a TF cycle → SIGABRT crash.
+  -- With published_frame="odom", the full chain is:
+  --   cartographer: map→odom  +  tf2_broadcaster: odom→base_footprint
+  published_frame                = "odom",
   odom_frame                     = "odom",
 
-  -- Use our EKF odometry as the initial pose estimate between scans.
-  -- Cartographer fuses this with scan matching for better accuracy.
+  -- Our tf2_broadcaster already provides odom→base_footprint from EKF output.
+  -- Set provide_odom_frame=false so cartographer uses our odom, not its own.
   provide_odom_frame             = false,
-  use_odometry                   = true,
+
+  -- use_odometry=false: cartographer reads odometry via TF (odom→base_footprint)
+  -- rather than subscribing to a /odom topic. Simpler and avoids QoS issues.
+  use_odometry                   = false,
 
   -- No IMU — we already fuse IMU into odometry via the EKF (Step 6).
   -- Cartographer's IMU integration would double-count it.

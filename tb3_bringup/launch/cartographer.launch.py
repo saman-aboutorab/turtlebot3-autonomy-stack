@@ -90,7 +90,6 @@ def generate_launch_description():
         remappings=[
             # Cartographer defaults to 'scan' — remap to our LiDAR topic '/scan'
             ('scan', '/scan'),
-            ('odom', '/odom'),
         ],
     )
 
