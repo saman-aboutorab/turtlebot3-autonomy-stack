@@ -187,4 +187,253 @@ mode change 100644 => 100755 tb3_odometry/tb3_odometry/tf2_checker.py
 
 ---
 
-*New entries to be added as the project progresses through Steps 4–12 and beyond.*
+---
+
+### [1-8a] Real robot: `KeyError: 'LDS_MODEL'` on launch
+
+**Date:** 2026-03-24
+**File:** turtlebot3_bringup system environment
+
+**Symptom:**
+```
+KeyError: 'LDS_MODEL'
+```
+Running `ros2 launch tb3_bringup robot.launch.py fake_joints:=false` crashed immediately.
+
+**Root cause:**
+`turtlebot3_bringup` reads the `LDS_MODEL` environment variable to select the LiDAR driver. It was not set in `.bashrc` on the RPi4.
+
+**Fix:**
+```bash
+echo 'export LDS_MODEL=LDS-01' >> ~/.bashrc && source ~/.bashrc
+```
+
+**Lesson:**
+When setting up a new RPi4, always add `LDS_MODEL=LDS-01` (and `TURTLEBOT3_MODEL=burger`) to `.bashrc` before running any turtlebot3_bringup commands.
+
+---
+
+### [1-8b] Real robot: OpenCR `Failed connection with Devices`
+
+**Date:** 2026-03-24
+**File:** OpenCR firmware
+
+**Symptom:**
+turtlebot3_ros started but immediately logged:
+```
+Failed connection with Devices
+```
+OpenCR LEDs: rhythmic blinking red pattern (not solid).
+
+**Hypothesis:**
+Serial port permission issue or wrong baud rate.
+
+**Root cause:**
+OpenCR was not flashed with the TurtleBot3 firmware. The rhythmic blinking red LED pattern (not a solid LED) indicates the OpenCR firmware could not connect to the Dynamixel motors, meaning it was running generic OpenCR firmware rather than the TurtleBot3-specific firmware.
+
+**Fix:**
+```bash
+# On RPi4
+wget https://github.com/ROBOTIS-GIT/OpenCR-Binaries/raw/master/turtlebot3/ROS2/latest/opencr_update.tar.bz2
+tar -xjf opencr_update.tar.bz2
+cd opencr_update
+./update.sh /dev/ttyACM0 burger.opencr
+```
+
+**Lesson:**
+OpenCR must be flashed with the TurtleBot3 firmware before first use. Solid LEDs = firmware connected to motors. Rhythmic blinking red = firmware did not connect to Dynamixel motors (wrong firmware or hardware fault).
+
+---
+
+### [1-8c] Real robot: packages not found on RPi4 after clone
+
+**Date:** 2026-03-24
+**File:** git repository
+
+**Symptom:**
+```
+ignoring unknown package 'tb3_bringup'
+colcon build: Failed to find tb3_navigation/share/tb3_navigation/package.sh
+```
+
+**Root cause:**
+RPi4 had cloned the `main` branch. All custom packages (`tb3_bringup`, `tb3_odometry`, `tb3_navigation`) are on the `stage-1` branch, which had never been pushed to GitHub until this session.
+
+**Fix:**
+```bash
+# On RPi4
+git checkout stage-1
+git pull origin stage-1
+colcon build --symlink-install --packages-select tb3_navigation tb3_bringup tb3_odometry
+```
+The explicit `--packages-select` is needed because `tb3_navigation` (a placeholder for Step 10) has no source yet and would fail a full build.
+
+**Lesson:**
+Always confirm the correct branch is checked out on the robot. After any `git pull`, rebuild with `colcon build --symlink-install`.
+
+---
+
+### [1-8d] Real robot: turtlebot3_ros crash — `'opencr.id' must be initialized`
+
+**Date:** 2026-03-24
+**File:** `tb3_bringup/launch/hardware.launch.py`
+
+**Symptom:**
+```
+UninitializedStaticallyTypedParameterException: 'opencr.id' must be initialized before it can be gotten
+```
+turtlebot3_ros crashed immediately after starting.
+
+**Root cause:**
+`hardware.launch.py` was not passing the `burger.yaml` parameter file. Without it, turtlebot3_ros has no hardware configuration and cannot initialise the OpenCR parameters. Also, the serial port was passed as a ROS parameter instead of a CLI argument.
+
+**Fix:**
+```python
+turtlebot3_node = Node(
+    ...
+    parameters=[tb3_params, {...}],   # burger.yaml must be first
+    arguments=['-i', '/dev/ttyACM0'], # serial port is a CLI arg, not a ROS param
+)
+```
+
+**Lesson:**
+`turtlebot3_ros` requires `burger.yaml` as a parameter file AND takes the serial port via `-i` CLI argument. Both are required. The serial port is not a ROS parameter.
+
+---
+
+### [1-8e] Real robot: turtlebot3_ros crash — `'namespace' must be initialized`
+
+**Date:** 2026-03-24
+**File:** `tb3_bringup/launch/hardware.launch.py`
+
+**Symptom:**
+```
+UninitializedStaticallyTypedParameterException: 'namespace' must be initialized
+```
+
+**Root cause:**
+Jazzy's version of `turtlebot3_ros` requires `namespace` as a statically-typed parameter. It is not present in `burger.yaml`.
+
+**Fix:**
+Add inline override in `hardware.launch.py`:
+```python
+{'namespace': ''}
+```
+
+**Lesson:**
+In ROS2 Jazzy, `turtlebot3_ros` requires several params not present in `burger.yaml`. They must be set explicitly as inline overrides in the launch file.
+
+---
+
+### [1-8f] Real robot: turtlebot3_ros crash — `'odometry.frame_id' must be initialized`
+
+**Date:** 2026-03-24
+**File:** `tb3_bringup/launch/hardware.launch.py`, `turtlebot3_bringup/param/burger.yaml`
+
+**Symptom:**
+```
+UninitializedStaticallyTypedParameterException: 'odometry.frame_id' must be initialized
+```
+
+**Root cause:**
+`burger.yaml` places odometry parameters under `diff_drive_controller`, not under `turtlebot3_node`. `turtlebot3_ros` never receives them from the file and requires them explicitly.
+
+Additionally, `burger.yaml` sets `enable_stamped_cmd_vel: true`, which makes `turtlebot3_ros` expect `geometry_msgs/TwistStamped` on `/cmd_vel`. Our `velocity_controller` publishes plain `geometry_msgs/Twist`. Commands were silently discarded.
+
+**Fix:**
+Add all required inline overrides in `hardware.launch.py`:
+```python
+{
+    'namespace':               '',
+    'odometry.frame_id':       'odom',
+    'odometry.child_frame_id': 'base_footprint',
+    'odometry.use_imu':        True,
+    'odometry.publish_tf':     False,   # our tf2_broadcaster owns odom→base_footprint
+    'enable_stamped_cmd_vel':  False,   # velocity_controller publishes plain Twist
+}
+```
+
+**Lesson:**
+`burger.yaml` cannot be trusted to provide all params that `turtlebot3_ros` needs in Jazzy. Always check which params are statically typed and override them inline. `enable_stamped_cmd_vel` must be `False` if your velocity source publishes `geometry_msgs/Twist`.
+
+---
+
+### [1-9a] Real robot: wrong teleop node used, TwistStamped conflict on `/cmd_vel`
+
+**Date:** 2026-03-24
+
+**Symptom:**
+Robot did not move when driving with `turtlebot3_teleop teleop_keyboard`. Echo of `/cmd_vel` failed:
+```
+Cannot echo topic '/cmd_vel', as it contains more than one type:
+[geometry_msgs/msg/Twist, geometry_msgs/msg/TwistStamped]
+```
+
+**Root cause:**
+Two problems:
+1. `turtlebot3_teleop teleop_keyboard` publishes `TwistStamped` directly to `/cmd_vel` — bypassing our `velocity_controller` entirely and using the wrong message type (we set `enable_stamped_cmd_vel: false`).
+2. This created a type conflict on `/cmd_vel`: velocity_controller published `Twist`, turtlebot3_teleop published `TwistStamped`. `turtlebot3_ros` could not accept either reliably.
+
+**Fix:**
+Use the correct teleop node:
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_raw
+```
+This routes through `velocity_controller` and publishes plain `Twist`.
+
+**Lesson:**
+Never use `turtlebot3_teleop teleop_keyboard` in this stack. Always use `teleop_twist_keyboard` remapped to `/cmd_vel_raw`.
+
+---
+
+### [1-9b] Real robot: `teleop.launch.py` crashes over SSH — termios error
+
+**Date:** 2026-03-24
+
+**Symptom:**
+```
+termios.error: (25, 'Inappropriate ioctl for device')
+[ERROR] [teleop_twist_keyboard-1]: process has died [pid ..., exit code 1]
+```
+Running `ros2 launch tb3_bringup teleop.launch.py` over SSH failed immediately.
+
+**Root cause:**
+`teleop_twist_keyboard` reads keyboard input via `termios` (Unix terminal I/O). When launched via `ros2 launch` over SSH, the node's stdin is a pipe, not a real TTY. `emulate_tty=True` in the launch file is intended to fix this but does not work reliably over SSH connections.
+
+**Fix:**
+Run the node directly with `ros2 run` instead of through the launch file:
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_raw
+```
+`ros2 run` connects stdin directly to the terminal — keyboard input works correctly.
+
+**Lesson:**
+`teleop_twist_keyboard` cannot be launched via `ros2 launch` over SSH even with `emulate_tty=True`. Always use `ros2 run` with an explicit remap when operating the robot over SSH.
+
+---
+
+### [1-9c] Workspace not sourced in new terminals
+
+**Date:** 2026-03-24
+
+**Symptom:**
+```
+Package 'tb3_bringup' not found: "package 'tb3_bringup' not found, searching: ['/opt/ros/jazzy']"
+```
+Any `ros2 launch` or `ros2 run` command with a custom package fails in a new terminal.
+
+**Root cause:**
+`install/setup.bash` must be sourced in every new terminal. Only the system ROS installation is sourced by default.
+
+**Fix:**
+Either source manually in each terminal:
+```bash
+source ~/ros2_ws/install/setup.bash
+```
+Or add to `.bashrc` for automatic sourcing:
+```bash
+echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
+```
+
+**Lesson:**
+Always `source install/setup.bash` before running any custom package commands. Adding it to `.bashrc` eliminates this permanently.

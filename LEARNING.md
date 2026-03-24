@@ -1484,18 +1484,52 @@ slam_toolbox needs the full TF chain `map → odom → base_footprint → base_s
 
 ---
 
+### Verify the stack is healthy before mapping
+
+Before driving, confirm all nodes and topics are running correctly:
+
+```bash
+# All 8 nodes should be listed (turtlebot3_node appears twice — that is normal)
+ros2 node list
+
+# /cmd_vel should be publishing zeros at rest (velocity_controller always outputs)
+ros2 topic echo /cmd_vel --once
+
+# Critical param: must be False so plain Twist commands are accepted
+ros2 param get /turtlebot3_node enable_stamped_cmd_vel
+
+# Sensors: IMU should be ~20 Hz (LiDAR check omitted — scan is visible in RViz)
+ros2 topic hz /imu
+```
+
+Expected:
+- `enable_stamped_cmd_vel` → `Boolean value is: False`
+- `/cmd_vel` → Twist with all zeros
+- `/imu` rate → ~20 Hz
+
+---
+
 ### On-robot procedure (when hardware is available)
 
 **Terminal 1 (on RPi4 or over SSH):**
 ```bash
+source ~/ros2_ws/install/setup.bash
 ros2 launch tb3_bringup slam.launch.py fake_joints:=false
 ```
 
-**Terminal 2 (laptop):**
+**Terminal 2 (on RPi4 or over SSH — new terminal, source first):**
 ```bash
-ros2 launch tb3_bringup teleop.launch.py
+source ~/ros2_ws/install/setup.bash
+
+# NOTE: use ros2 run, NOT ros2 launch teleop.launch.py
+# teleop_twist_keyboard needs a real TTY for keyboard input.
+# When launched via ros2 launch over SSH, emulate_tty=True is not enough
+# and the node crashes with: termios.error: (25, 'Inappropriate ioctl for device')
+# ros2 run connects stdin directly to the terminal — works correctly.
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_raw
+
 # Keys: i=forward  ,=back  j=left  l=right  k=stop
-# q/z = speed up/down
+# q/z = increase/decrease all speeds by 10%
 ```
 
 **Terminal 3 (laptop) — watch the map build in RViz:**
