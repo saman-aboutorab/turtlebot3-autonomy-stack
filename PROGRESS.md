@@ -469,3 +469,97 @@ echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
 
 **Lesson:**
 Always `source install/setup.bash` before running any custom package commands. Adding it to `.bashrc` eliminates this permanently.
+
+---
+
+### [1-9e] Real robot: `hlds_laser_publisher` runs but `/scan` publishes nothing — UNRESOLVED
+
+**Date:** 2026-03-24
+
+**Symptom:**
+Cartographer built zero submaps even after moving the robot. Traced to `/scan` never receiving any messages despite `hlds_laser_publisher` being in the node list.
+```
+ros2 topic hz /scan          # shows nothing
+ros2 topic echo /scan        # hangs indefinitely
+/submap_list: submap: []     # even after driving around
+```
+
+**Diagnosis steps taken (do not repeat these):**
+
+1. **Confirmed cartographer was not the problem** — `ros2 topic info /scan` showed publisher count 1, subscriber count 2, QoS compatible. Cartographer was subscribed and waiting. Submap list empty confirmed empty root cause is upstream.
+
+2. **Confirmed TF chain is fine** — `ros2 run tf2_ros tf2_echo base_footprint base_scan` returned the transform `[-0.032, 0.000, 0.182]` immediately. Cartographer can look up sensor location.
+
+3. **`ros2 topic hz /scan` appearing empty is normal — QoS mismatch** — `ros2 topic hz` and `ros2 topic echo` default to RELIABLE QoS. The LiDAR publishes BEST_EFFORT. Use:
+   ```bash
+   ros2 topic echo --qos-profile sensor_data /scan --no-arr
+   ```
+   Even with this, no messages appeared.
+
+4. **Hardware confirmed working** — LiDAR visibly spinning. `/dev/ttyUSB0` present. User in `dialout` group. Serial data confirmed flowing at 230400 baud:
+   ```bash
+   sudo stty -F /dev/ttyUSB0 230400 raw && sudo timeout 3 cat /dev/ttyUSB0 | xxd | head -5
+   # → hex bytes confirmed, data IS streaming from hardware
+   ```
+
+5. **No duplicate processes** — `ps aux | grep hlds` showed exactly one `hlds_laser_publisher` process. No port contention.
+
+6. **`ros2 param dump /hlds_laser_publisher` returns empty** — this is normal. `hls_lfcd_lds_driver` does not expose its parameters through the ROS2 param server even though they are passed via `--params-file`. Confirmed correct params via `cat /tmp/launch_params_*.`: `port: /dev/ttyUSB0`, `frame_id: base_scan`.
+
+7. **Standalone run shows driver initialises then goes silent:**
+   ```
+   [INFO] [hlds_laser_publisher]: Init hlds_laser_publisher Node Main
+   [INFO] [hlds_laser_publisher]: port : /dev/ttyUSB0 frame_id : base_scan
+   # (nothing more — driver blocking in read loop, no /scan published)
+   ```
+
+8. **No 0xFA at any baud rate** — performed full baud rate scan (57600, 115200, 230400, 460800, 921600). All returned 1000 bytes quickly with zero 0xFA occurrences. Also confirmed:
+   - Official `turtlebot3_bringup robot.launch.py` produces the same result (not our stack)
+   - Driver version: `ros-jazzy-hls-lfcd-lds-driver` 2.1.1
+   - `lsof /dev/ttyUSB0` confirmed driver has the port open (fd 21)
+   - `brltty` is inactive (not a serial port hijack)
+   - USB device confirmed as Silicon Labs CP2102 (VID 10c4, PID ea60) — correct chip for LDS-01
+   - `pyserial` confirmed 0xFA at zero positions at 230400 baud in 500 bytes
+   - Sending `b` (LDS-01 start command) had no effect
+
+**ROBOTIS diagnostic run (their requested commands):**
+```
+ls /dev/ttyUSB*           → /dev/ttyUSB0  ✓
+sudo stty -F /dev/ttyUSB0 230400 raw
+sudo timeout 5 cat /dev/ttyUSB0 | xxd | head -30
+```
+Output showed 480 bytes with zero `0xFA`. ROBOTIS expected `fa a0 XX...` at every row. The data is all garbage bytes (0xFE, 0x98, 0x80, 0x66, 0x7E — never 0xFA). This output was forwarded to ROBOTIS for their assessment.
+
+**Root cause:** Most likely a **broken internal UART connection** between the LiDAR sensor PCB and its USB board (CP2102). A floating or disconnected UART TX line generates electrical noise, which the CP2102 forwards as random bytes to USB — explaining why data flows at all baud rates but never contains a valid 0xFA packet header. The LiDAR motor spins independently of the serial interface, so the motor being active does not confirm the data path is intact.
+
+**Status:** HARDWARE FAULT — not a software issue. The driver, our launch files, and the stack are all correct.
+
+**Next steps (start here next session):**
+
+```bash
+# 1. Physical: inspect and reseat the flat ribbon/connector cable
+#    between the rotating LiDAR sensor module and the LiDAR base board (USB side).
+#    This cable is inside the LiDAR unit — check it is fully seated.
+
+# 2. After reseating, test with:
+sudo pkill -9 -f hlds_laser 2>/dev/null
+python3 -c "
+import serial
+s = serial.Serial('/dev/ttyUSB0', 230400, timeout=5)
+s.flushInput()
+s.write(b'b')
+data = s.read(500)
+s.close()
+positions = [i for i,b in enumerate(data) if b == 0xFA]
+print('0xFA count:', len(positions), '— expect ~11 for a healthy LiDAR')
+"
+
+# 3. If still no 0xFA after reseating, the LiDAR unit needs to be replaced.
+#    Replacement options:
+#      - LDS-01 (original): available from ROBOTIS or robotis.com (~$30-50)
+#      - RPLIDAR A1M8: compatible with nav2, driver available as ros-jazzy-rplidar-ros
+#      - YDLIDAR X4: compatible, driver available as ros-jazzy-ydlidar-ros2-driver
+```
+
+**If replacing with a different LiDAR model:**
+Our `hardware.launch.py` uses `hls_lfcd_lds_driver` hardcoded. A different LiDAR needs a different driver node and package. Update `hardware.launch.py` accordingly and keep `frame_id: base_scan` to preserve the TF chain.

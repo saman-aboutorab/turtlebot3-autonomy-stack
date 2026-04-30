@@ -1511,6 +1511,11 @@ Expected:
 
 ### On-robot procedure (when hardware is available)
 
+**Connect to RPi4 over SSH:**
+```bash
+ssh saman-aboutorab@ubuntu-pi-server.local
+```
+
 **Terminal 1 (on RPi4 or over SSH):**
 ```bash
 source ~/ros2_ws/install/setup.bash
