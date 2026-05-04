@@ -563,3 +563,102 @@ print('0xFA count:', len(positions), '— expect ~11 for a healthy LiDAR')
 
 **If replacing with a different LiDAR model:**
 Our `hardware.launch.py` uses `hls_lfcd_lds_driver` hardcoded. A different LiDAR needs a different driver node and package. Update `hardware.launch.py` accordingly and keep `frame_id: base_scan` to preserve the TF chain.
+
+---
+
+### [1-9f] Real robot: LDS-03 hardware fault confirmed — unit DOA
+
+**Date:** 2026-05-04
+
+**Symptom:**
+After mounting the ROBOTIS LDS-03 (replacement for the faulty LDS-01) and connecting
+its USB2LDS adapter to the RPi4, the serial test returned zero bytes:
+```
+Total bytes received: 0
+No data — hardware fault confirmed
+```
+
+**Diagnosis:**
+LDS-03 specs: Tx-only USART, 115200 baud, should auto-transmit on power-up.
+No command needed — data should flow immediately.
+`ls /dev/ttyUSB0` confirmed the USB2LDS adapter (CP2102) was detected by the OS.
+Test was run with the LiDAR fully assembled and connected; photo earlier in session
+showed pieces unconnected but the actual test was run with everything seated.
+
+**Root cause:**
+Unit received was hardware DOA. Zero bytes at 115200 baud despite the CP2102 being
+enumerated and `/dev/ttyUSB0` present.
+
+**Resolution:**
+Replaced with Slamtec RPLIDAR C1. See [1-9g].
+
+**Lesson:**
+LDS-03 is Tx-only — no wake-up command is possible or needed. If zero bytes are
+returned with `/dev/ttyUSB0` present and the unit powered, the hardware is faulty.
+
+---
+
+### [1-9g] Real robot: RPLIDAR C1 — driver setup and working configuration
+
+**Date:** 2026-05-04
+
+**Hardware:**
+Slamtec RPLIDAR C1. USB chip: STM32 Virtual COM Port (VID 0483:5740) — appears as
+`/dev/ttyACM0` is the OpenCR, `/dev/ttyUSB0` is the RPLIDAR C1 via its CP2102 adapter.
+
+**Baud rate discovery:**
+LDS-01 and LDS-03 used 115200/230400 baud. The C1 uses **460800 baud**.
+Confirmed via GET_INFO command sweep:
+```python
+s.write(b'\xA5\x50')  # GET_INFO command
+# Baud 115200: 0 bytes
+# Baud 460800: 27 bytes — a5 5a 14 00 00 00 04 ...  ← correct response header
+# Baud 256000: 0 bytes
+```
+`a5 5a` is the RPLIDAR response descriptor — confirms hardware alive and communicating.
+
+**Driver:**
+The apt package `ros-jazzy-rplidar-ros` (v2.1.0) provides `rplidar_composition`
+(not `rplidar_node` — the executable name changed in v2.x):
+```bash
+ros2 pkg executables rplidar_ros   # → rplidar_ros rplidar_composition
+```
+
+**Scan mode issue:**
+`rplidar_composition` with no scan_mode or with `scan_mode:=Standard` both failed:
+```
+[ERROR]: Cannot start scan: '80008002'  (RESULT_OPERATION_TIMEOUT)
+[ERROR]: Cannot start scan: '80008000'  (RESULT_INVALID_DATA)
+```
+Root cause: SDK 1.12.0 calls the deprecated `checkExpressScanSupported()` API first,
+which the C1 doesn't support. Setting `angle_compensate:=true` without a `scan_mode`
+param allows the driver to fall through to auto-mode selection, which picks "Standard"
+correctly.
+
+**Working command:**
+```bash
+ros2 run rplidar_ros rplidar_composition --ros-args \
+  -p serial_port:=/dev/ttyUSB0 \
+  -p serial_baudrate:=460800 \
+  -p frame_id:=base_scan \
+  -p angle_compensate:=true
+```
+Output:
+```
+current scan mode: Standard, max_distance: 16.0 m, Point number: 2.1K, angle_compensate: 1
+```
+`/scan` publishing at **10.0 Hz** confirmed.
+
+**Changes made to codebase:**
+- `tb3_bringup/launch/hardware.launch.py`: replaced `hls_lfcd_lds_driver`/`hlds_laser_publisher`
+  with `rplidar_ros`/`rplidar_composition`. Old driver blocks kept as commented reference.
+- `tb3_bringup/config/burger_cartographer.lua`: updated range limits
+  (min 0.12→0.05, max 3.5→12.0, missing_data_ray_length 3.0→10.0).
+  Old LDS-01 values kept as commented reference.
+
+**Lesson:**
+- RPLIDAR C1 baud rate is 460800, not 115200.
+- The executable in rplidar_ros v2.x is `rplidar_composition`, not `rplidar_node`.
+- Do not set `scan_mode` for C1 with SDK 1.12.0 — let the driver auto-select.
+  Setting `angle_compensate:=true` is required for correct cartographer geometry.
+- Keep `frame_id: base_scan` to preserve the TF chain regardless of LiDAR model.

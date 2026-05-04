@@ -4,12 +4,17 @@
 -- Based on revo_lds.lua (the reference config for a single rotating 2D LiDAR).
 --
 -- TF CHAIN:
---   cartographer publishes: map → odom  (provide_odom_frame = false)
+--   cartographer publishes: map → odom  (provide_odom_frame = true)
 --   tf2_broadcaster provides: odom → base_footprint  (from EKF output)
 --   robot_state_publisher provides: base_footprint → base_scan (fixed, from URDF)
 --   Full chain: map → odom → base_footprint → base_scan
 --
--- LDS-01 HARDWARE LIMITS:
+-- CURRENT LIDAR: Slamtec RPLIDAR C1 (mounted 2026-05-04)
+--   min_range: 0.05 m
+--   max_range: 12.0 m  (driver reports 16.0 m hardware limit; 12.0 m is rated spec)
+--   scan rate: 10 Hz, ~2100 points/scan
+--
+-- PREVIOUS LIDAR: ROBOTIS LDS-01 (retired 2026-03-24, hardware fault)
 --   min_range: 0.12 m
 --   max_range: 3.5 m
 
@@ -56,11 +61,18 @@ options = {
 
 MAP_BUILDER.use_trajectory_builder_2d = true
 
--- LDS-01 range limits (hardware spec).
-TRAJECTORY_BUILDER_2D.min_range = 0.12
-TRAJECTORY_BUILDER_2D.max_range = 3.5
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 3.0
+-- RPLIDAR C1 range limits (current hardware, mounted 2026-05-04).
+-- missing_data_ray_length must be < max_range: rays beyond max_range are
+-- replaced with this synthetic length so cartographer marks them as free space.
+TRAJECTORY_BUILDER_2D.min_range = 0.05
+TRAJECTORY_BUILDER_2D.max_range = 12.0
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 10.0
 TRAJECTORY_BUILDER_2D.use_imu_data = false
+
+-- LDS-01 range limits (previous hardware, retired 2026-03-24 — hardware fault).
+-- TRAJECTORY_BUILDER_2D.min_range = 0.12
+-- TRAJECTORY_BUILDER_2D.max_range = 3.5
+-- TRAJECTORY_BUILDER_2D.missing_data_ray_length = 3.0
 
 -- Real-time scan matcher for smooth tracking at low speeds.
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true

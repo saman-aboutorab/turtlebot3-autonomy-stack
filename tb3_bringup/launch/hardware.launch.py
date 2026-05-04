@@ -8,7 +8,7 @@ Intended to be included by robot.launch.py when fake_joints:=false.
 WHY THIS FILE EXISTS (and why we don't use turtlebot3_bringup robot.launch.py):
   The official turtlebot3_bringup robot.launch.py starts three things:
     1. robot_state_publisher  — we have our own, with our custom URDF
-    2. hlds_laser_publisher   — LiDAR driver, we need this
+    2. LiDAR driver           — we need this
     3. turtlebot3_ros          — OpenCR interface, we need this
 
   If we ran both the official bringup AND our robot.launch.py:
@@ -27,15 +27,28 @@ WHAT turtlebot3_ros DOES:
   - Reads battery / sensor state   → publishes /battery_state, /sensor_state
   - Subscribes to /cmd_vel         → sends velocity commands to the motors
 
-WHAT hlds_laser_publisher DOES:
-  - Opens /dev/ttyUSB0 (serial to LDS-01 LiDAR)
-  - Reads distance measurements    → publishes /scan (sensor_msgs/LaserScan)
+WHAT rplidar_composition DOES (RPLIDAR C1, current hardware):
+  - Opens /dev/ttyUSB0 at 460800 baud (STM32 USB chip on the C1 adapter board)
+  - Reads 360° distance measurements → publishes /scan (sensor_msgs/LaserScan)
+  - Range: 0.05–12 m, 10 Hz, 2.1K points/scan, frame_id=base_scan
+  - angle_compensate=true: interpolates points to uniform angular spacing
+
+  Previous LiDAR (LDS-01, hls_lfcd_lds_driver / hlds_laser_publisher):
+    - Connected via /dev/ttyUSB0 at 230400 baud (CP2102 USB chip)
+    - Range: 0.12–3.5 m, 5 Hz — replaced due to internal UART hardware fault
+    (broken ribbon cable between sensor PCB and USB board, zero 0xFA bytes
+    at all baud rates, confirmed 2026-03-24 — see PROGRESS.md [1-9e])
+
+  ROBOTIS LDS-03 (attempted replacement, also failed):
+    - Tx-only USART at 115200 baud, USB2LDS adapter (CP2102 chip)
+    - Confirmed hardware fault on unit received: 0 bytes at all tests
+    (see PROGRESS.md [1-9f])
 
 DATA FLOW ON REAL ROBOT:
   OpenCR ──── turtlebot3_ros ──► /joint_states ──► odometry_publisher → /odom
                              ──► /imu          ──► imu_republisher   → /imu/data
                              ◄── /cmd_vel      ◄── velocity_controller
-  LiDAR ───── hlds_laser     ──► /scan         ──► slam_toolbox
+  LiDAR ───── rplidar_node   ──► /scan         ──► cartographer
 """
 
 import os
@@ -99,18 +112,57 @@ def generate_launch_description():
     )
 
     # ── LiDAR driver ─────────────────────────────────────────────────────────
-    # hlds_laser_publisher reads the LDS-01 over /dev/ttyUSB0.
+    # Slamtec RPLIDAR C1 — current hardware as of 2026-05-04.
+    # rplidar_composition reads scans over /dev/ttyUSB0 at 460800 baud.
     # Publishes /scan (sensor_msgs/LaserScan, frame_id=base_scan).
+    # angle_compensate=True: interpolates points to uniform angular spacing,
+    #   required for cartographer to correctly interpret the scan geometry.
+    # scan_mode is left unset: the driver auto-selects "Standard" mode for C1.
+    #   (Explicitly setting scan_mode:=Standard fails with SDK 1.12.0 on C1
+    #    because the deprecated checkExpressScanSupported API is called first.)
     lidar_node = Node(
-        package='hls_lfcd_lds_driver',
-        executable='hlds_laser_publisher',
-        name='hlds_laser_publisher',
+        package='rplidar_ros',
+        executable='rplidar_composition',
+        name='rplidar_node',
         output='screen',
         parameters=[{
-            'port': '/dev/ttyUSB0',
-            'frame_id': 'base_scan',
+            'serial_port':     '/dev/ttyUSB0',
+            'serial_baudrate': 460800,
+            'frame_id':        'base_scan',
+            'angle_compensate': True,
         }],
     )
+
+    # ── Previous LiDAR drivers (kept for reference) ───────────────────────────
+    # LDS-01 driver (hls_lfcd_lds_driver) — hardware fault, retired 2026-03-24.
+    # Range: 0.12–3.5 m, 5 Hz, 230400 baud, CP2102 USB chip.
+    # Broken internal UART ribbon cable → zero 0xFA bytes at all baud rates.
+    #
+    # lidar_node = Node(
+    #     package='hls_lfcd_lds_driver',
+    #     executable='hlds_laser_publisher',
+    #     name='hlds_laser_publisher',
+    #     output='screen',
+    #     parameters=[{
+    #         'port':     '/dev/ttyUSB0',
+    #         'frame_id': 'base_scan',
+    #     }],
+    # )
+    #
+    # LDS-03 driver (ld08_driver) — hardware fault on unit received, retired 2026-05-04.
+    # Range: 0.05–12 m, 10 Hz, 115200 baud, Tx-only USART, USB2LDS adapter.
+    # Unit produced zero bytes at all serial tests — hardware DOA.
+    #
+    # lidar_node = Node(
+    #     package='ld08_driver',
+    #     executable='ld08_driver',
+    #     name='ld08_driver',
+    #     output='screen',
+    #     parameters=[{
+    #         'port':     '/dev/ttyUSB0',
+    #         'frame_id': 'base_scan',
+    #     }],
+    # )
 
     return LaunchDescription([
         turtlebot3_node,
