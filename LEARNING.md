@@ -1392,9 +1392,12 @@ Added a `use_joint_state_publisher` argument (default `true`) and wrapped `joint
 
 ## Step 9 — SLAM Map Building
 
-**Goal:** Drive the robot manually through a real space while slam_toolbox builds a 2D occupancy grid. Save the finished map as `.pgm` + `.yaml` for use in autonomous navigation (Step 10).
+**Goal:** Drive the robot manually through a real space while cartographer builds a 2D occupancy grid. Save the finished map as `.pgm` + `.yaml` for use in autonomous navigation (Step 10).
 
-**This step requires the real robot.** The laptop portion (teleop launch file, maps directory, verification test) is done first.
+**This step requires the real robot.**
+
+**Current hardware:** Slamtec RPLIDAR C1 (replaced ROBOTIS LDS-01 and LDS-03, both hardware faults).
+**SLAM engine:** Google Cartographer — slam_toolbox arm64 apt binary crashes on RPi4 (see PROGRESS.md [1-9d]).
 
 ---
 
@@ -1537,13 +1540,13 @@ cd ~/ros2_ws && colcon build --symlink-install --packages-select tb3_bringup
 source ~/ros2_ws/install/setup.bash
 ```
 
-**Terminal 1 (on RPi4 or over SSH):**
+**Terminal 1 — start full stack + cartographer SLAM:**
 ```bash
 source ~/ros2_ws/install/setup.bash
-ros2 launch tb3_bringup slam.launch.py fake_joints:=false
+ros2 launch tb3_bringup cartographer.launch.py fake_joints:=false
 ```
 
-**Terminal 2 (on RPi4 or over SSH — new terminal, source first):**
+**Terminal 2 — teleop (run on RPi4, NOT laptop):**
 ```bash
 source ~/ros2_ws/install/setup.bash
 
@@ -1552,32 +1555,54 @@ source ~/ros2_ws/install/setup.bash
 # When launched via ros2 launch over SSH, emulate_tty=True is not enough
 # and the node crashes with: termios.error: (25, 'Inappropriate ioctl for device')
 # ros2 run connects stdin directly to the terminal — works correctly.
+#
+# Also: run teleop ON THE RPi4, not on the laptop. If running on the laptop,
+# both machines must have the same ROS_DOMAIN_ID set in .bashrc.
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_raw
+```
 
-# Keys: i=forward  ,=back  j=left  l=right  k=stop
-# q/z = increase/decrease all speeds by 10%
+**Teleop keys:**
+```
+u    i    o
+j    k    l
+m    ,    .
+
+i = forward        , = backward       k = stop
+j = rotate left    l = rotate right
+q/z = increase/decrease ALL speeds by 10%
+w/x = increase/decrease LINEAR speed only   ← NOT forward/back — common mistake!
+e/c = increase/decrease ANGULAR speed only
 ```
 
 **Terminal 3 (laptop) — watch the map build in RViz:**
 ```bash
 rviz2
-# Add: Map → topic /map
-# Add: RobotModel
+# Add: Map → topic /map        (Fixed Frame: map)
 # Add: LaserScan → topic /scan
-# Fixed Frame: map
+# Add: TF
+# Note: first /map message appears ~1 s after start (cartographer two-node design)
 ```
 
 **Driving strategy for a clean map:**
-1. Drive slowly (50% of max speed: `z` key twice)
-2. Cover every area twice — once forward, once return
-3. Close every loop: return to doorways and junctions you have already mapped
+1. Drive slowly (`z` key twice to reduce speed to ~50%)
+2. Cover every area — hug walls, go into corners
+3. Close every loop: return to doorways and junctions already mapped
 4. Avoid sharp turns at full speed (wheel slip = odometry error = map tear)
 
-**Save the map when done:**
+**Save the map when done (Terminal 3 on RPi4):**
 ```bash
-ros2 run nav2_map_server map_saver_cli -f ~/maps/my_map
-# Creates: my_map.pgm  (grayscale image: white=free, black=wall, grey=unknown)
-#          my_map.yaml (metadata: resolution, origin, thresholds)
+source ~/ros2_ws/install/setup.bash
+ros2 run nav2_map_server map_saver_cli -f ~/ros2_ws/src/turtlebot3-autonomy-stack/maps/my_room
+# Creates: maps/my_room.pgm  (grayscale image: white=free, black=wall, grey=unknown)
+#          maps/my_room.yaml (metadata: resolution, origin, thresholds)
+```
+
+**Commit the map from the laptop** (GitHub requires PAT token, not password — use SCP to pull map to laptop first if pushing from RPi4 fails):
+```bash
+# On laptop — pull map files from RPi4:
+scp saman-aboutorab@ubuntu-pi-server.local:~/ros2_ws/src/turtlebot3-autonomy-stack/maps/my_room.pgm ~/projects/Robotics/turtlebot3-autonomy-stack/maps/
+scp saman-aboutorab@ubuntu-pi-server.local:~/ros2_ws/src/turtlebot3-autonomy-stack/maps/my_room.yaml ~/projects/Robotics/turtlebot3-autonomy-stack/maps/
+# Then commit and push from laptop as normal
 ```
 
 ---

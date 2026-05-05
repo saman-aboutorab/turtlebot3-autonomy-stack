@@ -3,11 +3,8 @@ build/
 install/
 log/
 
-# Map files saved by map_saver_cli (binary + metadata, not source code)
-# The maps/ directory itself is tracked (via maps/.gitkeep) so the folder
-# exists after cloning, but the map files you generate are local only.
-maps/*.pgm
-maps/*.yaml
+# Map files are tracked — they are the output of real robot SLAM sessions
+# and are needed for Nav2 in Step 10. Small files (~40 KB each).
 
 # Python
 __pycache__/
