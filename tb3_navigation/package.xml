@@ -22,9 +22,15 @@
   <depend>nav2_msgs</depend>
   <depend>action_msgs</depend>
 
-  <!-- Nav2 stack -->
-  <depend>nav2_bringup</depend>
-  <depend>slam_toolbox</depend>
+  <!-- Nav2 stack — individual packages used in launch + Python nodes -->
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_waypoint_follower</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

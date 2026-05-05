@@ -13,17 +13,22 @@ ament_python_install_package(${PROJECT_NAME})
 
 # Python node scripts
 install(PROGRAMS
-  # tb3_navigation/nav_goal_sender.py    # added in Step 10
+  tb3_navigation/nav_goal_sender.py      # Step 10 — single goal Nav2 client
   # tb3_navigation/waypoint_follower.py  # added in Step 11
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # C++ nodes (Step 12 — waypoint_follower.cpp port)
 
-# Launch and config files
+# Launch, config, and map files
+# maps/ is at the repo root — installed here so navigation.launch.py can
+# reference them via get_package_share_directory('tb3_navigation').
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
-  OPTIONAL
+)
+
+install(DIRECTORY ../maps
+  DESTINATION share/${PROJECT_NAME}
 )
 
 ament_package()

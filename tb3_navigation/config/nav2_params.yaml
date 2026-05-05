@@ -1,0 +1,293 @@
+# nav2_params.yaml
+# ================
+# Nav2 parameter configuration for TurtleBot3 Burger.
+#
+# Robot specs:
+#   Max linear velocity:  0.22 m/s
+#   Max angular velocity: 2.84 rad/s
+#   Physical radius:      ~0.105 m — we use 0.22 m with safety margin in costmaps
+#   LiDAR:                RPLIDAR C1, range 0.05–12 m, 10 Hz, 2.1K pts/scan
+#
+# Localisation: AMCL  — replaces cartographer's map→odom TF during navigation
+# Global planner:  NavFn (A* search on the global costmap)
+# Local controller: Regulated Pure Pursuit (RPP)
+
+# ── AMCL ─────────────────────────────────────────────────────────────────────
+# Adaptive Monte Carlo Localisation.
+# Maintains a cloud of particles (hypotheses) about where the robot is in the map.
+# Each particle = one possible pose (x, y, θ).
+# Particles that predict LiDAR scans matching reality survive; others die off.
+# After converging, AMCL publishes the map→odom TF continuously.
+amcl:
+  ros__parameters:
+    # Differential drive motion model — no lateral movement
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+
+    # Motion noise: how much actual wheel motion deviates from commanded motion.
+    # Higher = less trust in odometry, particles spread more.
+    alpha1: 0.2   # rotation noise from rotation
+    alpha2: 0.2   # rotation noise from translation
+    alpha3: 0.2   # translation noise from translation
+    alpha4: 0.2   # translation noise from rotation
+    alpha5: 0.2   # unused in diff model
+
+    # Particle filter: 500–2000 particles is enough for a small room on RPi4.
+    min_particles: 500
+    max_particles: 2000
+
+    # Only update particles when robot has moved enough (avoids wasted CPU when still)
+    update_min_d: 0.25      # metres
+    update_min_a: 0.2       # radians
+    resample_interval: 1
+
+    # Likelihood field model: faster and more robust than beam model for indoor SLAM
+    laser_model_type: "likelihood_field"
+    laser_max_range: 12.0   # RPLIDAR C1 max
+    laser_min_range: -1.0   # -1 = accept all returns
+    max_beams: 60           # downsample the 2.1K-point scan for speed
+    sigma_hit: 0.2
+    z_hit: 0.5
+    z_rand: 0.5
+    z_max: 0.05
+    z_short: 0.05
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+
+    # TF frames — must match our TF tree from Steps 2–6
+    global_frame_id: "map"
+    odom_frame_id: "odom"
+    base_frame_id: "base_footprint"
+    scan_topic: "scan"
+
+    # AMCL publishes the map→odom transform (takes over from cartographer)
+    tf_broadcast: true
+    transform_tolerance: 1.0
+
+    # Adaptive recovery (disabled — robot rarely gets truly lost in a small room)
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+
+    save_pose_rate: 0.5
+
+# ── BT Navigator ─────────────────────────────────────────────────────────────
+# Behaviour Tree navigator.
+# Receives NavigateToPose action goals and orchestrates the full navigation:
+#   1. ComputePathToPose  → calls planner_server → gets a global path
+#   2. FollowPath         → calls controller_server → executes the path
+#   3. Recovery           → if stuck: spin in place, back up, re-plan
+# Steps 1–3 are defined in an XML behaviour tree (default provided by nav2).
+bt_navigator:
+  ros__parameters:
+    global_frame: map
+    robot_base_frame: base_footprint
+    odom_topic: /odom
+    bt_loop_duration: 10      # ms between BT ticks
+    default_server_timeout: 20
+    navigators: ['navigate_to_pose', 'navigate_through_poses']
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator/NavigateToPoseNavigator"
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator/NavigateThroughPosesNavigator"
+
+# ── Planner Server ────────────────────────────────────────────────────────────
+# Global path planner — called once per new goal.
+# NavFn uses A* to search the global costmap for the shortest collision-free path.
+# The path is a list of waypoint poses from current location to the goal.
+planner_server:
+  ros__parameters:
+    planner_plugins: ['GridBased']
+    GridBased:
+      plugin: 'nav2_navfn_planner/NavfnPlanner'
+      tolerance: 0.5        # goal position tolerance (m)
+      use_astar: true       # A* is faster than Dijkstra for single-goal queries
+      allow_unknown: true   # plan through grey (unexplored) map areas if needed
+
+# ── Controller Server ─────────────────────────────────────────────────────────
+# Local path controller — runs at 20 Hz, generates cmd_vel to follow the global path.
+# Regulated Pure Pursuit (RPP): steers toward a lookahead point on the path,
+# slowing down near obstacles and sharp corners.
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0    # Hz
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    # If robot doesn't move 0.5 m within 10 s → declare navigation failure
+    progress_checker:
+      plugin: "nav2_controller/SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+
+    # Robot is "at goal" when within 0.25 m and 0.25 rad of the target pose
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller/SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+
+    # Regulated Pure Pursuit controller
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller/RegulatedPurePursuitController"
+
+      # Cruise speed — slightly below TurtleBot3 max (0.22 m/s) for safety
+      desired_linear_vel: 0.18
+
+      # Lookahead: how far ahead on the path the robot aims for.
+      # Larger = smoother; smaller = tighter cornering in narrow spaces.
+      lookahead_dist: 0.6
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.9
+      lookahead_time: 1.5
+
+      # Rotate to face the path direction before starting to move
+      use_rotate_to_heading: true
+      rotate_to_heading_angular_vel: 1.8
+      rotate_to_heading_min_angle: 0.785   # ~45 deg — only rotate if off by more than this
+      allow_reversing: false
+
+      # Slow down if an obstacle is projected to be hit within 1 s
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+
+      # Scale speed based on path curvature (slow on tight corners)
+      use_regulated_linear_velocity_scaling: true
+      use_fixed_curvature_lookahead: false
+      curvature_lookahead_dist: 0.25
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.25
+
+      # Slow down as the robot approaches the goal pose
+      min_approach_linear_velocity: 0.05
+      approach_velocity_scaling_dist: 0.6
+
+      max_angular_accel: 3.2
+      max_robot_pose_search_dist: 10.0
+      transform_tolerance: 0.1
+
+# ── Local Costmap ─────────────────────────────────────────────────────────────
+# Small window (~3m × 3m) around the robot, updated from live /scan at 5 Hz.
+# Used by the controller to dodge obstacles not in the static map
+# (moved furniture, people, etc.).
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom             # local costmap lives in odom frame — moves with robot
+      robot_base_frame: base_footprint
+      rolling_window: true           # window follows the robot
+      width: 3                       # metres
+      height: 3
+      resolution: 0.05               # 5 cm/cell — matches the saved map
+      robot_radius: 0.22
+
+      plugins: ["obstacle_layer", "inflation_layer"]
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True        # beams that pass through free space clear those cells
+          marking: True         # beam endpoints mark cells as occupied
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # Grow every obstacle outward so the robot centre path stays physically clear.
+        # inflation_radius >= robot_radius ensures the planner won't path through walls.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
+
+      always_send_full_costmap: True
+
+# ── Global Costmap ────────────────────────────────────────────────────────────
+# Covers the whole map, updated slowly at 1 Hz.
+# Used by the planner to find a collision-free path from current pose to goal.
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      robot_radius: 0.22
+      resolution: 0.05
+      track_unknown_space: true
+
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        # Reads the /map topic (from map_server) as the base obstacle layer.
+        map_subscribe_transient_local: True
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
+
+      always_send_full_costmap: True
+
+# ── Map Server ────────────────────────────────────────────────────────────────
+# Loads the .pgm/.yaml map from disk and publishes it on /map.
+# yaml_filename is overridden at launch time by navigation.launch.py.
+map_server:
+  ros__parameters:
+    yaml_filename: ""
+
+map_saver:
+  ros__parameters:
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: True
+
+# ── Lifecycle Manager ─────────────────────────────────────────────────────────
+# Nav2 nodes are lifecycle nodes with states: Unconfigured → Inactive → Active.
+# lifecycle_manager transitions them in order so dependencies are met:
+#   map_server must be Active before amcl reads the map.
+#   amcl must be publishing map→odom before planners need it.
+# autostart=True: activates all nodes automatically on launch.
+lifecycle_manager:
+  ros__parameters:
+    autostart: True
+    node_names:
+      - map_server
+      - amcl
+      - planner_server
+      - controller_server
+      - bt_navigator
+      - waypoint_follower
