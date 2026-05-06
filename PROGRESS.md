@@ -766,3 +766,129 @@ In ROS2 Jazzy, all Nav2 plugin class names use `::` not `/`. Any `nav2_params.ya
 from a Humble tutorial or the Nav2 docs (which may still show `/`) must have all plugin
 names updated. The lifecycle_manager fatal error will always name the valid class strings —
 read them from the error output to confirm the correct format.
+
+---
+
+### [1-10b] Nav2 startup deadlock — AMCL needs initial pose but TF needed to display map
+
+**Date:** 2026-05-06
+
+**Symptom:**
+After every fresh launch, `planner_server` logged a continuous loop:
+```
+Timed out waiting for transform from base_footprint to map to become available,
+tf error: Invalid frame ID "map" passed to canTransform argument target_frame
+```
+RViz showed "Frame [map] does not exist" with a blank viewport — no map visible.
+The lifecycle_manager never finished activating.
+
+**Root cause:**
+Chicken-and-egg deadlock in the startup sequence:
+1. `planner_server` activation blocks waiting for the `map→odom` TF to exist
+2. `map→odom` TF is published by AMCL only after it receives an initial pose estimate
+3. The initial pose is normally set via RViz's "2D Pose Estimate" button
+4. RViz cannot display the map (and therefore the button is useless) because the
+   `map` frame doesn't yet exist in TF — step 1 hasn't resolved yet
+
+The deadlock only occurs on a fresh boot. If a previous session left AMCL with a
+saved pose (`save_pose_rate: 0.5`), AMCL auto-resumes and the TF is published
+immediately. After a power cycle the saved pose is lost.
+
+**Fix:**
+Break the deadlock by publishing an approximate initial pose from the command line
+before or shortly after launching:
+```bash
+ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
+  '{header: {frame_id: "map"}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0},
+   orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}}'
+```
+AMCL receives the message → publishes `map→odom` TF → planner_server unblocks →
+lifecycle completes → map appears in RViz. Then refine with the 2D Pose Estimate
+tool once the map is visible.
+
+**Lesson:**
+On a fresh boot, always break the AMCL deadlock from the command line before trying
+to use RViz. Use the robot's last known approximate position if available (AMCL logs
+it as "Setting pose: x y yaw" — note it down after each successful session).
+A permanent fix is to add `set_initial_pose: true` with stored coordinates to
+the `amcl` section of `nav2_params.yaml` so AMCL auto-initialises at a known
+home position on every boot.
+
+---
+
+### [1-10c] bt_navigator fails to activate — "spin action server not available"
+
+**Date:** 2026-05-06
+
+**Symptom:**
+Every attempt to activate bt_navigator (by lifecycle_manager autostart or manually
+via `ros2 lifecycle set /bt_navigator activate`) returned `Transitioning failed`.
+The actual error only visible in the launch terminal:
+```
+[bt_navigator]: "spin" action server not available after waiting for 1.00s
+[bt_navigator]: Exception when loading BT: Action server spin not available
+[bt_navigator]: Error loading XML file:
+  /opt/ros/jazzy/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml
+```
+
+**Root cause:**
+The default Nav2 BT XML file (`navigate_to_pose_w_replanning_and_recovery.xml`) uses
+recovery behaviour nodes: `Spin`, `BackUp`, `Wait`, `DriveOnHeading`. These are provided
+by `behavior_server` (package `nav2_behaviors`). Our `navigation.launch.py` did not include
+this node — it was missing from the stack entirely.
+
+During bt_navigator activation, the BT engine loads the XML and tries to connect to the
+`spin` action server (which doesn't exist), times out after 1 s, and deactivates itself.
+
+**Fix:**
+Added `behavior_server` to `navigation.launch.py`, `nav2_params.yaml`, and `package.xml`:
+
+`navigation.launch.py`:
+```python
+behavior_server = Node(
+    package='nav2_behaviors',
+    executable='behavior_server',
+    name='behavior_server',
+    output='screen',
+    parameters=[nav2_params_file],
+)
+```
+Added `'behavior_server'` to the lifecycle_manager `node_names` list **before**
+`'bt_navigator'` so it is active when the BT XML loads.
+
+`nav2_params.yaml` — added `behavior_server` section with spin/backup/wait/drive_on_heading.
+
+**Lesson:**
+The Nav2 stack requires `behavior_server` in addition to the commonly listed nodes.
+It is easily forgotten because the Nav2 documentation shows it separately under
+"Recoveries". The failure manifests as a bt_navigator activation failure, not as a
+missing-node error, making it hard to diagnose without reading the launch terminal
+carefully. Always include `behavior_server` in any Nav2 deployment.
+
+---
+
+### [1-10d] RViz not showing Nav2 map — transient_local QoS mismatch
+
+**Date:** 2026-05-06
+
+**Symptom:**
+When launching plain `rviz2`, the Map display showed "Status: Warn" with Width: 0,
+Height: 0 — the map never appeared even though `map_server` was active and publishing.
+
+**Root cause:**
+`map_server` publishes `/map` with `transient_local` durability (messages are cached
+and delivered to late subscribers). Plain `rviz2` subscribes with `volatile` durability
+by default (only receives messages published after the subscription is created).
+Since RViz started after the map was published, it never received the cached message.
+
+**Fix:**
+Use the Nav2 RViz launch file which configures all displays with the correct QoS policies:
+```bash
+ros2 launch nav2_bringup rviz_launch.py
+```
+This also adds the Navigation 2 panel (initial pose, goal, feedback, recovery count).
+
+**Lesson:**
+Never use plain `rviz2` with Nav2. Always launch via `nav2_bringup rviz_launch.py`.
+If you must use plain RViz, find the Map display's "Durability Policy" setting and
+change it to "Transient Local".
