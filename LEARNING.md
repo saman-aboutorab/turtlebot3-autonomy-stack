@@ -1634,3 +1634,134 @@ Nav2 (Step 10) loads both files. The `.yaml` tells Nav2 how to interpret the pix
 - Does **not** tune slam_toolbox for the specific room. The `burger.yaml` parameters are good defaults; room-specific tuning (scan buffer size, loop closure thresholds) can be done later.
 
 *More steps to be added as the project progresses.*
+
+---
+
+---
+
+## Step 10 — Autonomous Navigation with Nav2
+
+**Goal:** Load the saved map, localise the robot using AMCL, and send 2D navigation goals.
+Nav2 plans a collision-free path and drives the robot autonomously to the destination.
+
+**Prerequisites:** map built in Step 9 (`maps/my_room.pgm` + `maps/my_room.yaml`).
+
+---
+
+### Every session — startup sequence
+
+**Terminal 1 (RPi4 SSH) — launch the full navigation stack:**
+```bash
+source ~/ros2_ws/install/setup.bash
+ros2 launch tb3_navigation navigation.launch.py fake_joints:=false
+```
+
+What starts: turtlebot3_ros · rplidar_ros (SDK 2.1.0) · robot_state_publisher ·
+odometry_publisher · imu_republisher · ekf_node · tf2_broadcaster · velocity_controller ·
+map_server · amcl · planner_server · controller_server · behavior_server ·
+bt_navigator · waypoint_follower · lifecycle_manager.
+
+Wait for this line before continuing:
+```
+[lifecycle_manager_navigation]: Managed nodes are active
+```
+
+**Terminal 2 (laptop) — launch RViz with the Nav2 config:**
+```bash
+ros2 launch nav2_bringup rviz_launch.py
+```
+
+> **Important:** always use `nav2_bringup rviz_launch.py`, not plain `rviz2`.
+> `map_server` publishes with `transient_local` QoS; plain RViz uses `volatile`
+> and will never receive the map message.
+
+---
+
+### Fix the AMCL startup deadlock (fresh boot only)
+
+On a fresh power cycle AMCL has no saved pose and will not publish the `map→odom` TF
+until it receives an initial pose estimate. But RViz cannot display the map without
+that TF, so the "2D Pose Estimate" button is useless. Break the deadlock from the
+command line first:
+
+**Terminal 3 (RPi4 SSH) — inject an approximate initial pose:**
+```bash
+ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
+  '{header: {frame_id: "map"}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0},
+   orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}}'
+```
+
+Replace `x: 0.0, y: 0.0` with the robot's approximate position if you know it.
+AMCL logs its last known pose as `Setting pose: x y yaw` — note it down at the end
+of each session so you can use it next time.
+
+After this command:
+- The map appears in RViz
+- The green AMCL particle cloud appears around the injected position
+
+---
+
+### Localise the robot (required before sending goals)
+
+1. In RViz click **2D Pose Estimate**
+2. Click on the map where the robot physically is, hold and drag the arrow to match
+   the direction the robot is facing, then release
+3. The particle cloud collapses to a tight cluster — AMCL is now localised
+
+If the particle cloud stays scattered after setting the pose, drive the robot a short
+distance with teleop (see Step 9 teleop commands) — AMCL converges faster with motion.
+
+---
+
+### Send a navigation goal
+
+**Option A — RViz (interactive):**
+1. Click **Nav2 Goal** in the toolbar
+2. Click on the map where you want the robot to go, drag to set target heading, release
+3. The Nav2 panel shows: ETA · Distance remaining · Recoveries
+
+> **Pick goals in white open space.** Avoid:
+> - Black areas (walls)
+> - Cyan/pink areas (inflated obstacle zones — robot radius buffer around walls)
+> - Goals closer than ~1 m to any wall
+> - Goals in grey unknown space (planner may fail)
+
+**Option B — command line (scripted):**
+```bash
+ros2 run tb3_navigation nav_goal_sender.py \
+  --ros-args -p goal_x:=1.0 -p goal_y:=0.5 -p goal_yaw:=0.0
+```
+
+---
+
+### What Nav2 does when you send a goal
+
+```
+Nav2 Goal
+  │  NavigateToPose action
+  ▼
+bt_navigator  (BT XML: navigate_to_pose_w_replanning_and_recovery.xml)
+  │
+  ├── ComputePathToPose ──► planner_server (NavFn A* on global_costmap)
+  │                              └── returns global path
+  │
+  ├── FollowPath ──────────► controller_server (Regulated Pure Pursuit, 20 Hz)
+  │                              └── /cmd_vel_raw → velocity_controller → motors
+  │
+  └── Recovery (if stuck)
+        spin / backup / wait  ← behavior_server
+        re-plan               ← planner_server
+```
+
+---
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| RViz blank, "Frame [map] does not exist" | AMCL hasn't published TF yet | Inject initial pose via `ros2 topic pub /initialpose` (see above) |
+| "Goal was rejected by server" | bt_navigator inactive or goal in obstacle | Check `ros2 lifecycle list /bt_navigator`; pick goal in white open space |
+| "Failed to create plan" | Goal in obstacle or too close to wall | Move goal to open white area, at least 1 m from walls |
+| `bt_navigator` stuck inactive | `behavior_server` not yet activated | `ros2 lifecycle set /behavior_server activate` then `ros2 lifecycle set /bt_navigator activate` |
+| Map not visible in RViz | Plain `rviz2` used (wrong QoS) | Relaunch with `ros2 launch nav2_bringup rviz_launch.py` |
+| RPLIDAR error `80008002` | Motor not spinning — apt SDK 1.12.0 bug | Build rplidar_ros from source (SDK 2.1.0) — see [1-9h] in PROGRESS.md |
