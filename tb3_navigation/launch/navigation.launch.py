@@ -152,6 +152,20 @@ def generate_launch_description():
         ],
     )
 
+    # ── behavior_server ───────────────────────────────────────────────────────
+    # Lifecycle node. Provides recovery action servers required by the default
+    # Nav2 BT XML (navigate_to_pose_w_replanning_and_recovery.xml):
+    #   spin, backup, wait, drive_on_heading
+    # Without this, bt_navigator fails to activate with:
+    #   "spin action server not available"
+    behavior_server = Node(
+        package='nav2_behaviors',
+        executable='behavior_server',
+        name='behavior_server',
+        output='screen',
+        parameters=[nav2_params_file],
+    )
+
     # ── bt_navigator ──────────────────────────────────────────────────────────
     # Lifecycle node. Exposes the NavigateToPose action server.
     # Orchestrates: ComputePathToPose → FollowPath → Recovery behaviours.
@@ -179,10 +193,9 @@ def generate_launch_description():
     )
 
     # ── lifecycle_manager ─────────────────────────────────────────────────────
-    # Manages Nav2 node lifecycle transitions in order:
-    #   map_server → amcl → planner_server → controller_server → bt_navigator
-    # Each node must reach Active state before the next is started.
-    # autostart=True transitions all nodes automatically without manual calls.
+    # Manages Nav2 node lifecycle transitions in order.
+    # behavior_server must be active before bt_navigator so that the spin/
+    # backup/wait action servers are available when the BT XML is loaded.
     lifecycle_manager = Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
@@ -195,6 +208,7 @@ def generate_launch_description():
                 'amcl',
                 'planner_server',
                 'controller_server',
+                'behavior_server',
                 'bt_navigator',
                 'waypoint_follower',
             ],
@@ -209,6 +223,7 @@ def generate_launch_description():
         amcl,
         planner_server,
         controller_server,
+        behavior_server,
         bt_navigator,
         waypoint_follower,
         lifecycle_manager,
