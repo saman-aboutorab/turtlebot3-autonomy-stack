@@ -662,3 +662,107 @@ current scan mode: Standard, max_distance: 16.0 m, Point number: 2.1K, angle_com
 - Do not set `scan_mode` for C1 with SDK 1.12.0 — let the driver auto-select.
   Setting `angle_compensate:=true` is required for correct cartographer geometry.
 - Keep `frame_id: base_scan` to preserve the TF chain regardless of LiDAR model.
+
+---
+
+### [1-9h] Real robot: RPLIDAR C1 motor fails to restart between sessions — SDK 1.12.0 incompatibility
+
+**Date:** 2026-05-05
+
+**Symptom:**
+After a successful SLAM session (map built), killing and restarting the driver always fails:
+```
+[ERROR]: Cannot start scan: '80008002'   (RESULT_OPERATION_TIMEOUT)
+[ERROR]: Failed to set scan mode
+```
+The driver connects, reads S/N, firmware, and health status successfully, but then times out
+waiting for scan data. The warnings just before the error are the key diagnostic clue:
+```
+*WARN* YOU ARE USING DEPRECATED API: checkExpressScanSupported(bool&,_u32)
+*WARN* YOU ARE USING DEPRECATED API: getSampleDuration_uS
+```
+
+**What was attempted (do not repeat):**
+1. SET_MOTOR_PWM via Python serial (PWM=660, wait 5s) — motor still dead when driver opened port.
+   Root cause: closing the Python serial port likely deasserted DTR, stopping the motor.
+2. Running the driver twice back-to-back — both fail identically.
+3. RESET command (0xA5 0x40) — received boot banner but driver still timed out.
+4. Power cycle robot → driver worked again (confirming state, not hardware, was the problem).
+
+**Root cause:**
+SDK 1.12.0 uses the deprecated `checkExpressScanSupported()` API. For the RPLIDAR C1 (a
+newer model designed for SDK 2.x), this call negotiates a scan mode that the C1 firmware
+does not respond to correctly via the old protocol. The driver then times out waiting for
+scan data that never arrives. On a fresh power-on the motor happens to spin up within the
+2.5 s timeout window; after a session the motor state is stale and the timeout fails.
+
+**Fix:**
+Build `rplidar_ros` from source using Slamtec's official GitHub repo (ros2 branch), which
+ships SDK 2.1.0 with proper C1 motor control and scan mode negotiation:
+```bash
+cd ~/ros2_ws/src
+git clone --single-branch --branch ros2 \
+  https://github.com/Slamtec/rplidar_ros.git rplidar_ros_src
+
+cd ~/ros2_ws
+colcon build --packages-select rplidar_ros
+source install/setup.bash
+```
+After the source build, the driver logs:
+```
+RPLidar running on ROS2 package rplidar_ros. RPLIDAR SDK Version:2.1.0
+current scan mode: DenseBoost, sample rate: 5 Khz, max_distance: 40.0 m, scan frequency:10.0 Hz
+```
+DenseBoost is the C1's native high-density mode — better than Standard (5 kHz vs 2.1 kHz).
+The motor now reliably restarts across sessions without a power cycle.
+
+**Lesson:**
+SDK 1.12.0 (apt `ros-jazzy-rplidar-ros`) is incompatible with the RPLIDAR C1. The C1 was
+designed for SDK 2.x. Build from source; the apt package will NOT work reliably. After any
+fresh clone on a new machine, always run the source build for rplidar_ros.
+
+---
+
+### [1-10a] Nav2 plugin names: `/` namespace separator rejected in ROS2 Jazzy
+
+**Date:** 2026-05-06
+
+**Symptom:**
+`navigation.launch.py` launched all nodes but lifecycle_manager aborted immediately:
+```
+[FATAL] [planner_server]: Failed to create global planner.
+Exception: According to the loaded plugin descriptions the class
+nav2_navfn_planner/NavfnPlanner with base class type nav2_core::GlobalPlanner
+does not exist. Declared types are nav2_navfn_planner::NavfnPlanner
+nav2_smac_planner::SmacPlanner2D ...
+[ERROR] [lifecycle_manager_navigation]: Failed to bring up all requested nodes. Aborting bringup.
+```
+RViz showed "Frame [map] does not exist" and "No map received" because AMCL never
+activated (lifecycle manager aborted before reaching it).
+
+**Root cause:**
+ROS2 Jazzy uses `::` (C++ namespace separator) in plugin class names, not `/`.
+`nav2_params.yaml` was written with the old `/` convention used in Humble and earlier:
+```yaml
+plugin: 'nav2_navfn_planner/NavfnPlanner'          # wrong in Jazzy
+plugin: "nav2_bt_navigator/NavigateToPoseNavigator" # wrong in Jazzy
+```
+The error message itself lists the valid names, which all use `::`.
+
+**Fix:**
+Changed all plugin names in `tb3_navigation/config/nav2_params.yaml` from `/` to `::`:
+```
+nav2_navfn_planner/NavfnPlanner                              → nav2_navfn_planner::NavfnPlanner
+nav2_regulated_pure_pursuit_controller/RegulatedPurePursuitController → nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+nav2_bt_navigator/NavigateToPoseNavigator                    → nav2_bt_navigator::NavigateToPoseNavigator
+nav2_bt_navigator/NavigateThroughPosesNavigator              → nav2_bt_navigator::NavigateThroughPosesNavigator
+nav2_controller/SimpleProgressChecker                        → nav2_controller::SimpleProgressChecker
+nav2_controller/SimpleGoalChecker                            → nav2_controller::SimpleGoalChecker
+```
+Plugins that already used `::` (costmap layers, AMCL motion model) were unaffected.
+
+**Lesson:**
+In ROS2 Jazzy, all Nav2 plugin class names use `::` not `/`. Any `nav2_params.yaml` copied
+from a Humble tutorial or the Nav2 docs (which may still show `/`) must have all plugin
+names updated. The lifecycle_manager fatal error will always name the valid class strings —
+read them from the error output to confirm the correct format.

@@ -89,9 +89,9 @@ bt_navigator:
     default_server_timeout: 20
     navigators: ['navigate_to_pose', 'navigate_through_poses']
     navigate_to_pose:
-      plugin: "nav2_bt_navigator/NavigateToPoseNavigator"
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
     navigate_through_poses:
-      plugin: "nav2_bt_navigator/NavigateThroughPosesNavigator"
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
 
 # ── Planner Server ────────────────────────────────────────────────────────────
 # Global path planner — called once per new goal.
@@ -101,7 +101,7 @@ planner_server:
   ros__parameters:
     planner_plugins: ['GridBased']
     GridBased:
-      plugin: 'nav2_navfn_planner/NavfnPlanner'
+      plugin: 'nav2_navfn_planner::NavfnPlanner'
       tolerance: 0.5        # goal position tolerance (m)
       use_astar: true       # A* is faster than Dijkstra for single-goal queries
       allow_unknown: true   # plan through grey (unexplored) map areas if needed
@@ -124,20 +124,20 @@ controller_server:
 
     # If robot doesn't move 0.5 m within 10 s → declare navigation failure
     progress_checker:
-      plugin: "nav2_controller/SimpleProgressChecker"
+      plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.5
       movement_time_allowance: 10.0
 
     # Robot is "at goal" when within 0.25 m and 0.25 rad of the target pose
     general_goal_checker:
       stateful: True
-      plugin: "nav2_controller/SimpleGoalChecker"
+      plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
 
     # Regulated Pure Pursuit controller
     FollowPath:
-      plugin: "nav2_regulated_pure_pursuit_controller/RegulatedPurePursuitController"
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # Cruise speed — slightly below TurtleBot3 max (0.22 m/s) for safety
       desired_linear_vel: 0.18
