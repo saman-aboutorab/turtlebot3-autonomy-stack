@@ -1755,6 +1755,40 @@ bt_navigator  (BT XML: navigate_to_pose_w_replanning_and_recovery.xml)
 
 ---
 
+### Hardware assembly rules (learn these once)
+
+**Wheel motors — forward direction**
+
+The two Dynamixel wheels must be assembled per the official TurtleBot3 Burger guide.
+When pressing `i` in teleop:
+- The **driven wheels lead** (they are at the robot's front)
+- The **caster ball trails** (it is at the robot's rear, `x = -0.177` in the URDF)
+
+If the caster leads when pressing `i`, the motors are assembled backward. This is a
+hardware problem — no URDF change can fix it. Reassemble per the guide.
+
+**RPLIDAR C1 — scan angle 0 is at the cable, not the arrow**
+
+The arrow on the RPLIDAR C1 housing marks the visual front of the sensor casing.
+The ROS driver's angle 0 (the start of the `/scan` message) corresponds to the
+**cable/connector direction** — the opposite side from the arrow.
+
+Correct mounting for this project:
+- Cable exits toward the robot's **rear** (caster side)
+- Arrow faces toward the robot's **front** (wheel side)
+- The URDF compensates with `rpy="0 0 3.14159"` on the `base_scan` joint
+
+With this setup, angle 0 (cable = rear) maps to the `base_scan` frame's x-axis
+(which points backward after the 180° rotation), keeping TF and scan geometry
+consistent.
+
+**If the AMCL scan appears flipped 180°:**
+The `base_scan` rpy is wrong, or the LiDAR is physically mounted opposite to the
+above. A 180° flip is the clearest sign: the scan aligns when you set the initial
+pose pointing backward. Fix by correcting the URDF rpy and rebuilding the map.
+
+---
+
 ### Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -1764,4 +1798,6 @@ bt_navigator  (BT XML: navigate_to_pose_w_replanning_and_recovery.xml)
 | "Failed to create plan" | Goal in obstacle or too close to wall | Move goal to open white area, at least 1 m from walls |
 | `bt_navigator` stuck inactive | `behavior_server` not yet activated | `ros2 lifecycle set /behavior_server activate` then `ros2 lifecycle set /bt_navigator activate` |
 | Map not visible in RViz | Plain `rviz2` used (wrong QoS) | Relaunch with `ros2 launch nav2_bringup rviz_launch.py` |
+| AMCL scan flipped 180° — only aligns when initial pose faces backward | `base_scan` rpy is `0 0 0` but RPLIDAR cable points rearward | Set `rpy="0 0 3.14159"` in `base_scan` joint, rebuild map |
+| Robot drives backward when commanded forward | Dynamixel motors assembled in reverse | Physically reassemble motors per TurtleBot3 Burger guide |
 | RPLIDAR error `80008002` | Motor not spinning — apt SDK 1.12.0 bug | Build rplidar_ros from source (SDK 2.1.0) — see [1-9h] in PROGRESS.md |

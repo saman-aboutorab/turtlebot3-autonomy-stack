@@ -892,3 +892,96 @@ This also adds the Navigation 2 panel (initial pose, goal, feedback, recovery co
 Never use plain `rviz2` with Nav2. Always launch via `nav2_bringup rviz_launch.py`.
 If you must use plain RViz, find the Map display's "Durability Policy" setting and
 change it to "Transient Local".
+
+---
+
+### [1-10e] Robot drove backward — Dynamixel wheel motors assembled in reverse
+
+**Date:** 2026-05-07
+
+**Symptom:**
+When pressing `i` in teleop (positive linear velocity), the robot moved with the
+caster wheel leading and the two driven wheels trailing. The robot physically drove
+in the opposite direction from Nav2's expectation — goals would cause the robot to
+navigate backwards.
+
+**Root cause:**
+The two Dynamixel wheel motors were physically assembled 180° rotated from the
+standard TurtleBot3 Burger configuration. The URDF defines:
+- Driven wheels at `x = 0.0` (centre axle)
+- Caster at `x = -0.177` (rear)
+- Forward = +x direction
+
+With the motors reversed, positive linear velocity drove the robot in the -x
+direction (caster-first), which is the opposite of every TF, costmap, and
+navigation assumption.
+
+**What ruled out a software fix:**
+Updating the URDF only changes the TF tree / sensor geometry — it does not change
+which direction the OpenCR firmware drives the motors. A URDF-only fix would have
+left Nav2 commanding the robot to go forward while it physically went backward.
+
+**Fix:**
+Physically reassembled the two Dynamixel motors in the correct orientation per the
+official TurtleBot3 Burger assembly guide. After reassembly, pressing `i` drives
+the robot with the driven wheels leading (caster trailing) — matching the URDF.
+
+**Lesson:**
+Motor direction on a differential drive robot is determined by hardware assembly,
+not software. A URDF change cannot fix reversed motors. If the robot drives backward
+when commanded forward, check the physical motor orientation against the assembly
+guide before attempting any software workaround.
+
+---
+
+### [1-10f] AMCL scan 180° flipped — RPLIDAR C1 angle 0 is at the cable side, not the arrow
+
+**Date:** 2026-05-07
+
+**Symptom:**
+After rebuilding the map with the corrected wheel orientation, AMCL localisation
+was still wrong. In RViz:
+- Setting 2D Pose Estimate in the robot's actual forward direction → scan rotated
+  180° relative to the map walls
+- Setting 2D Pose Estimate 180° backward → scan aligned perfectly with the map,
+  but all navigation goals were then executed in the opposite direction
+
+**Hypothesis:**
+Initially assumed the map was built with the old (wrong) wheel orientation and
+needed to be rebuilt. Rebuilt the map — problem persisted.
+
+**Root cause:**
+The RPLIDAR C1's scan data (angle 0 in the `/scan` LaserScan message) starts at
+the **cable/connector side** of the sensor, not at the arrow side. The arrow marks
+the sensor housing's visual front, but the ROS driver outputs angle 0 in the
+direction the cable exits.
+
+Physical mounting: cable exits toward the robot's rear (caster side), arrow faces
+forward (wheel side). This means angle 0 physically points backward (-x in the
+robot frame), while the URDF's `base_scan` frame had `rpy="0 0 0"` — telling TF
+that angle 0 should be in the forward (+x) direction. This 180° mismatch caused
+every scan point to be projected onto the wrong side of the map.
+
+The SLAM map geometry was still geometrically correct (cartographer is robust to
+this because all scans were consistently flipped), but the robot's heading
+convention inside the map was 180° off, causing AMCL to require a backward initial
+pose and then navigate in reverse.
+
+**Fix:**
+Rotated the `base_scan` joint 180° around z in the URDF:
+```xml
+<!-- hardware/urdf/turtlebot3_burger_sensors.urdf.xacro -->
+<origin xyz="-0.032 0.0 0.172" rpy="0 0 3.14159"/>
+```
+Then rebuilt the map (`my_room_v3`) with the corrected URDF so the map's heading
+convention matched the fixed TF. After this, setting the initial pose in the normal
+forward direction caused the scan to align correctly with the map walls, and
+navigation goals were executed in the correct direction.
+
+**Lesson:**
+For the RPLIDAR C1 (and likely other RPLIDAR models), angle 0 in the `/scan`
+message corresponds to the **cable/connector direction**, not the arrow. When
+mounting the sensor with the cable pointing toward the robot's rear, always add
+`rpy="0 0 3.14159"` to the `base_scan` joint in the URDF. Changing the URDF
+requires rebuilding the map — the old map will have the flipped convention baked in
+and AMCL will not localise correctly with the new URDF.
