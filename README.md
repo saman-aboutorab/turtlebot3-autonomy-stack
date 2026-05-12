@@ -2,7 +2,7 @@
 
 > **Real-hardware ROS2 autonomy stack on TurtleBot3 Burger — from wheel odometry and SLAM to vision-guided navigation with LiDAR, RGB-D, and on-device AI inference. Python + C++.**
 
-![ROS2](https://img.shields.io/badge/ROS2-Humble-blue?logo=ros)
+![ROS2](https://img.shields.io/badge/ROS2-Jazzy-blue?logo=ros)
 ![Platform](https://img.shields.io/badge/Platform-TurtleBot3%20Burger-orange)
 ![Language](https://img.shields.io/badge/Language-Python%20%7C%20C%2B%2B-green)
 ![Hardware](https://img.shields.io/badge/Hardware-Real%20Robot-red)
@@ -38,7 +38,7 @@ This is not a simulation project. Every node, every algorithm, and every demo vi
 | **TurtleBot3 Burger** | Robotis | Differential-drive mobile base |
 | **Raspberry Pi 4** (4GB) | Onboard SBC | ROS2 host, motor control bridge |
 | **OpenCR 1.0** | ARM Cortex-M7 | Low-level motor controller, IMU |
-| **RPLiDAR A1M8** | 360° 2D LiDAR, 12m range | SLAM, obstacle avoidance |
+| **RPLIDAR C1** | 360° 2D LiDAR, 40m range, DenseBoost 5kHz | SLAM, obstacle avoidance |
 | **IMU** | MPU-9250 (inside OpenCR) | Orientation, angular velocity |
 
 ### Stage 2 Addition
@@ -417,19 +417,14 @@ map
 
 ### Prerequisites
 
-- Ubuntu 22.04 (on RPi4 and/or Jetson)
-- ROS2 Humble
-- Python 3.10+
+- Ubuntu 24.04 (RPi4 and laptop)
+- ROS2 Jazzy
+- Python 3.12+
 - colcon build tools
 
 ### 1. Flash RPi4
 
-Download the Robotis ROS2 Humble image for TurtleBot3 and flash to a 32GB+ microSD using Raspberry Pi Imager.
-
-```bash
-# After boot, configure WiFi and SSH
-sudo raspi-config
-```
+Download the Ubuntu 24.04 Server image and flash to a 32GB+ microSD using Raspberry Pi Imager. Then install ROS2 Jazzy following the official install guide.
 
 ### 2. Set ROS2 Domain
 
@@ -441,34 +436,81 @@ echo "export TURTLEBOT3_MODEL=burger" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### 3. Clone & Build
+### 3. Workspace Setup
+
+This project uses a **separate build workspace** (`~/ros2_ws`) that points to the git repo via a symlink. The git repo is where you edit code; `~/ros2_ws` is where you build and run.
+
+```
+~/ros2_ws/
+  src/
+    turtlebot3-autonomy-stack  ← symlink → ~/projects/Robotics/turtlebot3-autonomy-stack
+  build/                       ← colcon output (not in git)
+  install/                     ← installed packages (source this before ros2 run)
+  log/
+
+~/projects/Robotics/turtlebot3-autonomy-stack/   ← git repo, edit code here
+  tb3_bringup/
+  tb3_navigation/
+  tb3_odometry/
+  hardware/
+  maps/
+  ...
+```
+
+**First-time setup on any machine (laptop or RPi4):**
 
 ```bash
-cd ~
-git clone https://github.com/YOUR_USERNAME/turtlebot3-autonomy-stack.git
-cd turtlebot3-autonomy-stack
+# 1. Clone the repo
+git clone https://github.com/saman-aboutorab/turtlebot3-autonomy-stack.git \
+  ~/projects/Robotics/turtlebot3-autonomy-stack
 
-# Install dependencies
+# 2. Create the workspace and symlink
+mkdir -p ~/ros2_ws/src
+ln -s ~/projects/Robotics/turtlebot3-autonomy-stack ~/ros2_ws/src/turtlebot3-autonomy-stack
+
+# 3. Install dependencies
+cd ~/ros2_ws
 rosdep update
-rosdep install --from-paths . --ignore-src -r -y
+rosdep install --from-paths src --ignore-src -r -y
 
-# Build
-colcon build --symlink-install
+# 4. Build
+colcon build
 source install/setup.bash
 ```
+
+**Rebuilding after code changes (run from `~/ros2_ws` on both laptop and RPi4):**
+
+```bash
+cd ~/ros2_ws && colcon build --packages-select <package_name> && source install/setup.bash
+```
+
+**After a `git pull` on the RPi4:**
+
+```bash
+cd ~/projects/Robotics/turtlebot3-autonomy-stack && git pull
+cd ~/ros2_ws && colcon build --packages-select tb3_bringup tb3_navigation tb3_odometry && source install/setup.bash
+```
+
+> **Rule:** Always edit code in the git repo. Always build and run from `~/ros2_ws`.
+> Never run `colcon build` from inside the git repo — build artifacts belong in `~/ros2_ws`.
 
 ### 4. Stage-Specific Dependencies
 
 **Stage 1 (base):**
 ```bash
 sudo apt install -y \
-  ros-humble-navigation2 \
-  ros-humble-nav2-bringup \
-  ros-humble-slam-toolbox \
-  ros-humble-robot-localization \
-  ros-humble-turtlebot3 \
-  ros-humble-turtlebot3-msgs
+  ros-jazzy-navigation2 \
+  ros-jazzy-nav2-bringup \
+  ros-jazzy-cartographer \
+  ros-jazzy-cartographer-ros \
+  ros-jazzy-robot-localization \
+  ros-jazzy-turtlebot3 \
+  ros-jazzy-turtlebot3-msgs
 ```
+
+> **Note:** Use cartographer for SLAM (not slam-toolbox — the Jazzy arm64 binary crashes on RPi4).
+> RPLIDAR C1 driver must be built from source (SDK 2.1.0) — the apt package ships SDK 1.12.0
+> which is incompatible with the C1. See PROGRESS.md entries [1-9g] and [1-9h].
 
 **Stage 2 (OAK-D Lite):**
 ```bash
@@ -648,11 +690,12 @@ This project follows the **Antonio Brandi ROS2 Self-Driving series** (Udemy) and
 This project is built incrementally across 4 hardware stages. When writing code:
 
 - **Always check which stage is currently active** — only use hardware/packages available for that stage
-- **Current active stage:** Stage 1 (TurtleBot3 Burger with RPi4 + RPLiDAR only)
-- **ROS2 version:** Humble (Ubuntu 22.04)
+- **Current active stage:** Stage 1 (TurtleBot3 Burger with RPi4 + RPLIDAR C1 only)
+- **ROS2 version:** Jazzy (Ubuntu 24.04)
 - **Robot model:** TurtleBot3 Burger (`TURTLEBOT3_MODEL=burger`)
-- **Workspace:** `~/turtlebot3-autonomy-stack/`
-- **Build system:** colcon with `--symlink-install`
+- **Git repo (edit code here):** `~/projects/Robotics/turtlebot3-autonomy-stack/`
+- **Build workspace (build and run here):** `~/ros2_ws/` (symlink: `~/ros2_ws/src/turtlebot3-autonomy-stack` → git repo)
+- **Build command:** `cd ~/ros2_ws && colcon build --packages-select <pkg> && source install/setup.bash`
 
 ### Coding Conventions
 - C++ nodes go in `package_name/src/node_name.cpp`
