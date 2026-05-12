@@ -116,20 +116,25 @@ class WaypointFollower(Node):
     def _result_callback(self, future):
         result = future.result()
         status = result.status
-        missed = list(result.result.missed_waypoints)
+        missed_indices = [mw.index for mw in result.result.missed_waypoints]
 
-        if status == GoalStatus.STATUS_SUCCEEDED and not missed:
+        if status == GoalStatus.STATUS_SUCCEEDED and not missed_indices:
             self.get_logger().info(
                 f'Mission complete — all {len(WAYPOINTS)} waypoints reached.'
             )
-        elif missed:
-            reached = len(WAYPOINTS) - len(missed)
-            self.get_logger().warn(
-                f'Mission finished: {reached}/{len(WAYPOINTS)} waypoints reached. '
-                f'Missed indices: {missed}'
+        elif status == GoalStatus.STATUS_ABORTED:
+            # stop_on_failure=True: mission aborted at first failed waypoint.
+            # Remaining waypoints were never attempted — don't count them as reached.
+            self.get_logger().error(
+                f'Mission aborted at waypoint {missed_indices[0] if missed_indices else "?"} '
+                f'(stop_on_failure). Subsequent waypoints were not attempted.'
             )
         else:
-            self.get_logger().error(f'Mission failed (status={status}).')
+            reached = len(WAYPOINTS) - len(missed_indices)
+            self.get_logger().warn(
+                f'Mission finished: {reached}/{len(WAYPOINTS)} waypoints reached. '
+                f'Missed indices: {missed_indices}'
+            )
 
         rclpy.shutdown()
 
