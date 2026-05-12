@@ -14,7 +14,7 @@ ament_python_install_package(${PROJECT_NAME})
 # Python node scripts
 install(PROGRAMS
   tb3_navigation/nav_goal_sender.py      # Step 10 — single goal Nav2 client
-  # tb3_navigation/waypoint_follower.py  # added in Step 11
+  tb3_navigation/waypoint_follower.py   # Step 11 — multi-waypoint mission
   DESTINATION lib/${PROJECT_NAME}
 )
 
