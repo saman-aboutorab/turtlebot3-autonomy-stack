@@ -24,12 +24,12 @@ amcl:
     robot_model_type: "nav2_amcl::DifferentialMotionModel"
 
     # Motion noise: how much actual wheel motion deviates from commanded motion.
-    # Raised to 0.4 — gives particles more room to spread during spin recoveries
-    # and fast turns, reducing the chance of the filter losing track mid-navigation.
-    alpha1: 0.4   # rotation noise from rotation
-    alpha2: 0.4   # rotation noise from translation
-    alpha3: 0.4   # translation noise from translation
-    alpha4: 0.4   # translation noise from rotation
+    # Keep at 0.2 — higher values cause excessive particle spread during spin
+    # recoveries, making convergence to the correct heading less likely.
+    alpha1: 0.2   # rotation noise from rotation
+    alpha2: 0.2   # rotation noise from translation
+    alpha3: 0.2   # translation noise from translation
+    alpha4: 0.2   # translation noise from rotation
     alpha5: 0.2   # unused in diff model
 
     # More particles = more hypotheses covered = less likely to lose track.
@@ -297,9 +297,9 @@ behavior_server:
     robot_base_frame: base_footprint
     transform_tolerance: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    max_rotational_vel: 0.5   # was 1.0 — slower spin gives AMCL time to track heading
+    min_rotational_vel: 0.2   # was 0.4
+    rotational_acc_lim: 1.6   # was 3.2 — gentler ramp-up
 
 # ── Map Server ────────────────────────────────────────────────────────────────
 # Loads the .pgm/.yaml map from disk and publishes it on /map.
